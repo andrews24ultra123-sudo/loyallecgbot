@@ -1,4 +1,4 @@
-import asyncio
+import logging
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -8,10 +8,11 @@ TOKEN = "8241808848:AAH_Qw-53tbVqT-er8lU-beUI2U2cuUsncE"
 CHAT_ID = int("54380770")  # group id
 
 SGT = ZoneInfo("Asia/Singapore")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 # ---------- Helpers to compute target dates ----------
 def next_weekday_date(now_dt: datetime, weekday: int):
-    """Return the date of the next given weekday (Mon=0..Sun=6)."""
+    """Return the date of the next given weekday (Mon=0..Sun=6). If today == weekday, return next week's."""
     days_ahead = (weekday - now_dt.weekday()) % 7
     if days_ahead == 0:
         days_ahead = 7
@@ -67,17 +68,16 @@ async def start(update, ctx):
         "/testpoll → Quick test poll"
     )
 
-async def cgpoll_cmd(update, ctx):
+async def cgpoll_cmd(update, ctx):  # manual trigger
     await send_cell_group(ctx)
 
-async def sunpoll_cmd(update, ctx):
+async def sunpoll_cmd(update, ctx):  # manual trigger
     await send_sunday_service(ctx)
 
-async def testpoll_cmd(update, ctx):
+async def testpoll_cmd(update, ctx):  # manual trigger
     await send_test_poll(ctx)
 
-# ---------- Main app ----------
-async def main():
+def main():
     app = Application.builder().token(TOKEN).build()
 
     # Commands
@@ -86,20 +86,15 @@ async def main():
     app.add_handler(CommandHandler("sunpoll", sunpoll_cmd))
     app.add_handler(CommandHandler("testpoll", testpoll_cmd))
 
-    # Scheduled jobs (SGT)
+    # Schedules (SGT) — Sun/Mon for CG, Fri/Sat for Sunday Service
     jq = app.job_queue
-    # Cell Group reminders: Sunday 18:00 & Monday 18:00
-    jq.run_daily(send_cell_group, time=time(18, 0, tzinfo=SGT), days=(6,))  # Sunday
-    jq.run_daily(send_cell_group, time=time(18, 0, tzinfo=SGT), days=(0,))  # Monday
-    # Sunday Service reminders: Friday 23:30 & Saturday 12:00
-    jq.run_daily(send_sunday_service, time=time(23, 30, tzinfo=SGT), days=(4,))  # Friday
-    jq.run_daily(send_sunday_service, time=time(12, 0, tzinfo=SGT), days=(5,))   # Saturday
+    jq.run_daily(send_cell_group,    time=time(18, 0, tzinfo=SGT), days=(6,))   # Sunday 18:00
+    jq.run_daily(send_cell_group,    time=time(18, 0, tzinfo=SGT), days=(0,))   # Monday 18:00
+    jq.run_daily(send_sunday_service,time=time(23,30, tzinfo=SGT), days=(4,))   # Friday 23:30
+    jq.run_daily(send_sunday_service,time=time(12, 0, tzinfo=SGT), days=(5,))   # Saturday 12:00
 
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    print("✅ Bot is running on Railway with schedules + test command")
-    await asyncio.Event().wait()
+    logging.info("Starting bot with run_polling() …")
+    app.run_polling(allowed_updates=None)  # blocks; handles loop internally
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
