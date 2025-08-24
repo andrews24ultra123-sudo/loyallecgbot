@@ -18,11 +18,8 @@ def next_weekday_date(now_dt: datetime, weekday: int):
         days_ahead = 7
     return (now_dt + timedelta(days=days_ahead)).date()
 
-def upcoming_wednesday(now_dt: datetime):
-    return next_weekday_date(now_dt, 2)  # Wednesday
-
-def upcoming_sunday(now_dt: datetime):
-    return next_weekday_date(now_dt, 6)  # Sunday
+def upcoming_wednesday(now_dt: datetime): return next_weekday_date(now_dt, 2)
+def upcoming_sunday(now_dt: datetime):    return next_weekday_date(now_dt, 6)
 
 # ---------- Poll senders ----------
 async def send_sunday_service(ctx: ContextTypes.DEFAULT_TYPE):
@@ -68,14 +65,18 @@ async def start(update, ctx):
         "/testpoll → Quick test poll"
     )
 
-async def cgpoll_cmd(update, ctx):  # manual trigger
-    await send_cell_group(ctx)
+async def cgpoll_cmd(update, ctx):  await send_cell_group(ctx)
+async def sunpoll_cmd(update, ctx):  await send_sunday_service(ctx)
+async def testpoll_cmd(update, ctx): await send_test_poll(ctx)
 
-async def sunpoll_cmd(update, ctx):  # manual trigger
-    await send_sunday_service(ctx)
-
-async def testpoll_cmd(update, ctx):  # manual trigger
-    await send_test_poll(ctx)
+def schedule_jobs(app: Application):
+    jq = app.job_queue  # available because we installed the [job-queue] extra
+    # Cell Group reminders: Sunday 18:00 & Monday 18:00
+    jq.run_daily(send_cell_group,     time=time(18, 0, tzinfo=SGT), days=(6,))  # Sunday
+    jq.run_daily(send_cell_group,     time=time(18, 0, tzinfo=SGT), days=(0,))  # Monday
+    # Sunday Service reminders: Friday 23:30 & Saturday 12:00
+    jq.run_daily(send_sunday_service, time=time(23,30, tzinfo=SGT), days=(4,))  # Friday
+    jq.run_daily(send_sunday_service, time=time(12, 0, tzinfo=SGT), days=(5,))  # Saturday
 
 def main():
     app = Application.builder().token(TOKEN).build()
@@ -86,15 +87,11 @@ def main():
     app.add_handler(CommandHandler("sunpoll", sunpoll_cmd))
     app.add_handler(CommandHandler("testpoll", testpoll_cmd))
 
-    # Schedules (SGT) — Sun/Mon for CG, Fri/Sat for Sunday Service
-    jq = app.job_queue
-    jq.run_daily(send_cell_group,    time=time(18, 0, tzinfo=SGT), days=(6,))   # Sunday 18:00
-    jq.run_daily(send_cell_group,    time=time(18, 0, tzinfo=SGT), days=(0,))   # Monday 18:00
-    jq.run_daily(send_sunday_service,time=time(23,30, tzinfo=SGT), days=(4,))   # Friday 23:30
-    jq.run_daily(send_sunday_service,time=time(12, 0, tzinfo=SGT), days=(5,))   # Saturday 12:00
+    # Schedules
+    schedule_jobs(app)
 
     logging.info("Starting bot with run_polling() …")
-    app.run_polling(allowed_updates=None)  # blocks; handles loop internally
+    app.run_polling(allowed_updates=None)
 
 if __name__ == "__main__":
     main()
