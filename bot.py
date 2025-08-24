@@ -70,7 +70,7 @@ async def sunpoll_cmd(update, ctx): await send_sunday_service(ctx)
 async def testpoll_cmd(update, ctx): await send_test_poll(ctx)
 
 def schedule_jobs(app: Application):
-    jq = app.job_queue  # available because we installed the [job-queue] extra
+    jq = app.job_queue
     # Cell Group: Sunday 18:00 & Monday 18:00
     jq.run_daily(send_cell_group,     time=time(18, 0, tzinfo=SGT), days=(6,))  # Sunday
     jq.run_daily(send_cell_group,     time=time(18, 0, tzinfo=SGT), days=(0,))  # Monday
@@ -91,7 +91,7 @@ def main():
     schedule_jobs(app)
 
     logging.info("Starting bot with run_polling() …")
-    app.run_polling(allowed_updates=None)  # blocks; manages event loop
+    app.run_polling(allowed_updates=None)  # single long-polling runner
 
 if __name__ == "__main__":
     main()
