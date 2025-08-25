@@ -71,12 +71,12 @@ async def testpoll_cmd(update, ctx): await send_test_poll(ctx)
 
 def schedule_jobs(app: Application):
     jq = app.job_queue  # available because we install [job-queue]
-    # Cell Group: Sunday 18:00 & Monday 18:00
+    # Cell Group: Sunday 18:00 & Monday 18:00 (SGT)
     jq.run_daily(send_cell_group,     time=time(18, 0, tzinfo=SGT), days=(6,))  # Sunday
     jq.run_daily(send_cell_group,     time=time(18, 0, tzinfo=SGT), days=(0,))  # Monday
-    # Sunday Service: Friday 23:30 & Saturday 12:00
+    # Sunday Service: Friday 23:30 & Saturday 12:00 (SGT)
     jq.run_daily(send_sunday_service, time=time(23,30, tzinfo=SGT), days=(4,))  # Friday
-    jq.run_daily(send_sunday_service, time=time(12, 0, tzinfo=SGT), days=(5,))  # Saturday
+    jq.run_daily(send_sunday_service, time=time(12, 0, tzinfo=SGT),  days=(5,))  # Saturday
 
 def main():
     app = Application.builder().token(TOKEN).build()
