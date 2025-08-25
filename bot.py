@@ -1,3 +1,4 @@
+import os
 import logging
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
@@ -14,11 +15,14 @@ PIN_POLLS = False
 SGT = ZoneInfo("Asia/Singapore")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# --- In-memory state for latest poll message IDs (lost on restart) ---
-STATE = {
-    "cg_poll_msg_id": None,      # last Cell Group poll message_id
-    "svc_poll_msg_id": None,     # last Sunday Service poll message_id
-}
+# ======== Redis (async client) ========
+# On Railway: Add Redis add-on → copy connection URL into a variable REDIS_URL
+import redis.asyncio as redis
+REDIS_URL = os.environ.get("REDIS_URL")  # e.g. redis://default:PASS@HOST:PORT/0
+r: redis.Redis | None = None  # set in main()
+
+CG_KEY = "cg_poll_msg_id"
+SVC_KEY = "svc_poll_msg_id"
 
 # ---------- Helpers ----------
 def next_weekday_date(now_dt: datetime, weekday: int):
@@ -31,9 +35,21 @@ def next_weekday_date(now_dt: datetime, weekday: int):
 def upcoming_friday(now_dt: datetime): return next_weekday_date(now_dt, 4)
 def upcoming_sunday(now_dt: datetime): return next_weekday_date(now_dt, 6)
 
+async def set_msg_id(key: str, message_id: int):
+    if r is not None:
+        await r.set(key, str(message_id))
+
+async def get_msg_id(key: str) -> int | None:
+    if r is None:
+        return None
+    val = await r.get(key)
+    try:
+        return int(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
 # ---------- Poll senders ----------
 async def send_sunday_service_poll(ctx: ContextTypes.DEFAULT_TYPE):
-    """Post the Sunday Service poll; store its message_id."""
     now = datetime.now(SGT)
     target = upcoming_sunday(now)
     msg = await ctx.bot.send_poll(
@@ -43,7 +59,7 @@ async def send_sunday_service_poll(ctx: ContextTypes.DEFAULT_TYPE):
         is_anonymous=False,
         allows_multiple_answers=True,
     )
-    STATE["svc_poll_msg_id"] = msg.message_id
+    await set_msg_id(SVC_KEY, msg.message_id)
     if PIN_POLLS:
         try:
             await ctx.bot.pin_chat_message(CHAT_ID, msg.message_id, disable_notification=True)
@@ -51,7 +67,6 @@ async def send_sunday_service_poll(ctx: ContextTypes.DEFAULT_TYPE):
             logging.warning(f"Pin failed: {e}")
 
 async def send_cell_group_poll(ctx: ContextTypes.DEFAULT_TYPE):
-    """Post the Cell Group poll for upcoming Friday; store its message_id."""
     now = datetime.now(SGT)
     target = upcoming_friday(now)
     msg = await ctx.bot.send_poll(
@@ -61,16 +76,16 @@ async def send_cell_group_poll(ctx: ContextTypes.DEFAULT_TYPE):
         is_anonymous=False,
         allows_multiple_answers=False,
     )
-    STATE["cg_poll_msg_id"] = msg.message_id
+    await set_msg_id(CG_KEY, msg.message_id)
     if PIN_POLLS:
         try:
             await ctx.bot.pin_chat_message(CHAT_ID, msg.message_id, disable_notification=True)
         except Exception as e:
             logging.warning(f"Pin failed: {e}")
 
-# ---------- Reminder senders (reply to the existing poll) ----------
+# ---------- Reminders (reply to the existing poll) ----------
 async def remind_sunday_service(ctx: ContextTypes.DEFAULT_TYPE):
-    poll_id = STATE.get("svc_poll_msg_id")
+    poll_id = await get_msg_id(SVC_KEY)
     if poll_id:
         await ctx.bot.send_message(
             chat_id=CHAT_ID,
@@ -79,7 +94,6 @@ async def remind_sunday_service(ctx: ContextTypes.DEFAULT_TYPE):
             reply_parameters=ReplyParameters(message_id=poll_id),
         )
     else:
-        # Fallback if bot restarted and lost state
         await ctx.bot.send_message(
             chat_id=CHAT_ID,
             text="⏰ *Reminder*: Please vote on the Sunday Service poll (pinned/latest).",
@@ -87,7 +101,7 @@ async def remind_sunday_service(ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 async def remind_cell_group(ctx: ContextTypes.DEFAULT_TYPE):
-    poll_id = STATE.get("cg_poll_msg_id")
+    poll_id = await get_msg_id(CG_KEY)
     if poll_id:
         await ctx.bot.send_message(
             chat_id=CHAT_ID,
@@ -113,8 +127,8 @@ async def start(update, ctx):
         "  - Fri 11:30 PM → post the poll\n"
         "  - Sat 12:00 PM → reminder (replies to same poll)\n\n"
         "Manual commands:\n"
-        "/cgpoll → post CG poll now (for upcoming Friday)\n"
-        "/cgrm   → reminder to the *last* CG poll\n"
+        "/cgpoll  → post CG poll now (for upcoming Friday)\n"
+        "/cgrm    → reminder to the *last* CG poll\n"
         "/sunpoll → post Sunday Service poll now (for upcoming Sunday)\n"
         "/sunrm   → reminder to the *last* Sunday Service poll\n"
         "/testpoll → quick test poll"
@@ -140,13 +154,19 @@ def schedule_jobs(app: Application):
     # Cell Group (upcoming Friday):
     jq.run_daily(send_cell_group_poll, time=time(18, 0, tzinfo=SGT), days=(6,))  # Sunday 6pm → POST POLL
     jq.run_daily(remind_cell_group,    time=time(18, 0, tzinfo=SGT), days=(0,))  # Monday 6pm → REMINDER
-
     # Sunday Service (upcoming Sunday):
     jq.run_daily(send_sunday_service_poll, time=time(23,30, tzinfo=SGT), days=(4,))  # Friday 11:30pm → POST POLL
     jq.run_daily(remind_sunday_service,    time=time(12,  0, tzinfo=SGT), days=(5,))  # Saturday 12pm → REMINDER
 
 # ---------- Main ----------
 def main():
+    global r
+    if not REDIS_URL:
+        raise RuntimeError(
+            "REDIS_URL not set. In Railway, add a Redis add-on and set REDIS_URL in Variables."
+        )
+    r = redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+
     app = Application.builder().token(TOKEN).build()
 
     # Commands
