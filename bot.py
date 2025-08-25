@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ======== HARD-CODED TOKEN & GROUP CHAT ID ========
 TOKEN = "8448114982:AAFjVekkgALSK9M3CKc8K7KjrUSTcsvPvIc"
-CHAT_ID = -1001819726736  # <-- updated group chat ID
+CHAT_ID = -1001819726736  # your group chat ID
 
 # Pin polls? (True/False)
 PIN_POLLS = False
@@ -92,6 +92,8 @@ async def start(update, ctx):
         "• Cell Group (Friday):\n"
         "  - Sun 6:00 PM → post poll\n"
         "  - Mon 6:00 PM → reminder\n"
+        "  - Thu 6:00 PM → reminder\n"
+        "  - Fri 3:00 PM → reminder\n"
         "• Sunday Service:\n"
         "  - Fri 11:30 PM → post poll\n"
         "  - Sat 12:00 PM → reminder\n\n"
@@ -119,12 +121,14 @@ async def testpoll_cmd(update, ctx):
 # ---------- Scheduler ----------
 def schedule_jobs(app: Application):
     jq = app.job_queue
-    # CG: poll Sun, reminder Mon
-    jq.run_daily(send_cell_group_poll, time=time(18,0,tzinfo=SGT), days=(6,))
-    jq.run_daily(remind_cell_group,    time=time(18,0,tzinfo=SGT), days=(0,))
+    # CG: poll Sun, reminders Mon + Thu + Fri(3pm)
+    jq.run_daily(send_cell_group_poll, time=time(18, 0, tzinfo=SGT), days=(6,))  # Sunday 6pm → POST POLL
+    jq.run_daily(remind_cell_group,    time=time(18, 0, tzinfo=SGT), days=(0,))  # Monday 6pm → REMINDER
+    jq.run_daily(remind_cell_group,    time=time(18, 0, tzinfo=SGT), days=(3,))  # Thursday 6pm → REMINDER
+    jq.run_daily(remind_cell_group,    time=time(15, 0, tzinfo=SGT), days=(4,))  # Friday 3pm → REMINDER
     # Service: poll Fri, reminder Sat
-    jq.run_daily(send_sunday_service_poll, time=time(23,30,tzinfo=SGT), days=(4,))
-    jq.run_daily(remind_sunday_service,    time=time(12,0,tzinfo=SGT), days=(5,))
+    jq.run_daily(send_sunday_service_poll, time=time(23, 30, tzinfo=SGT), days=(4,))  # Friday 11:30pm → POST POLL
+    jq.run_daily(remind_sunday_service,    time=time(12, 0,  tzinfo=SGT), days=(5,))  # Saturday 12pm → REMINDER
 
 # ---------- Main ----------
 def main():
