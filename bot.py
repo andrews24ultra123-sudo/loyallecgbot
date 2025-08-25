@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ======== HARD-CODED TOKEN & GROUP CHAT ID ========
 TOKEN = "8448114982:AAFjVekkgALSK9M3CKc8K7KjrUSTcsvPvIc"
-CHAT_ID = -4911009091  # <-- your group chat ID
+CHAT_ID = -1001819726736  # <-- updated group chat ID
 
 # Pin polls? (True/False)
 PIN_POLLS = False
