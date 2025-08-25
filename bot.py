@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 # ---------- Helpers ----------
 def next_weekday_date(now_dt: datetime, weekday: int):
-    """Next given weekday (Mon=0..Sun=6). If today==weekday, returns next week's."""
+    """Next given weekday (Mon=0..Sun=6). If today==weekday, return next week's."""
     days_ahead = (weekday - now_dt.weekday()) % 7
     if days_ahead == 0:
         days_ahead = 7
@@ -70,7 +70,7 @@ async def sunpoll_cmd(update, ctx): await send_sunday_service(ctx)
 async def testpoll_cmd(update, ctx): await send_test_poll(ctx)
 
 def schedule_jobs(app: Application):
-    jq = app.job_queue
+    jq = app.job_queue  # available because we install [job-queue]
     # Cell Group: Sunday 18:00 & Monday 18:00
     jq.run_daily(send_cell_group,     time=time(18, 0, tzinfo=SGT), days=(6,))  # Sunday
     jq.run_daily(send_cell_group,     time=time(18, 0, tzinfo=SGT), days=(0,))  # Monday
