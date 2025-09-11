@@ -107,6 +107,7 @@ def format_date_plain(d) -> str:  # e.g., 31st August 2025
 def _effective_target_chat(update: Optional[Update]) -> int:
     return update.effective_chat.id if (update and update.effective_chat) else DEFAULT_CHAT_ID
 
+# ---------- Pin helper ----------
 async def _safe_pin(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
     if not PIN_POLLS: return
     try:
@@ -127,6 +128,7 @@ async def _safe_pin(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: in
         except Exception:
             pass
 
+# ---------- Poll senders ----------
 async def _send_cg_poll(ctx: ContextTypes.DEFAULT_TYPE, target_chat: int, target_date):
     msg = await ctx.bot.send_poll(
         chat_id=target_chat,
@@ -151,7 +153,7 @@ async def _send_svc_poll(ctx: ContextTypes.DEFAULT_TYPE, target_chat: int, targe
     _save_state()
     await _safe_pin(ctx, target_chat, msg.message_id)
 
-# ---------- Poll senders (scheduler uses force=False; manual can force=True) ----------
+# Scheduler uses force=False; manual commands pass force=True
 async def send_sunday_service_poll(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None, *, force: bool = False):
     now = datetime.now(SGT)
     if not force and now.weekday() != 4:  # Friday
@@ -166,9 +168,15 @@ async def send_cell_group_poll(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[
         return
     await _send_cg_poll(ctx, _effective_target_chat(update), upcoming_friday_for_poll(now))
 
-# ---------- Reminders (reply to poll if we have it) ----------
+# ---------- Reminders (with weekday/time guards for scheduler) ----------
 async def remind_sunday_service(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None):
-    now = datetime.now(SGT); date_txt = format_date_plain(sunday_for_reminder(now))
+    now = datetime.now(SGT)
+    # If called by scheduler (update is None), enforce Sat 12:00 only
+    if update is None:
+        if not (now.weekday() == 5 and now.hour == 12):  # Saturday 12:00
+            logging.info(f"Suppressed Service reminder off-window: {now.isoformat()}")
+            return
+    date_txt = format_date_plain(sunday_for_reminder(now))
     ref = STATE.get("svc_poll")
     if isinstance(ref, PollRef):
         await ctx.bot.send_message(ref.chat_id, f"⏰ Reminder: Please vote on the Sunday Service poll above for {date_txt}.",
@@ -177,7 +185,14 @@ async def remind_sunday_service(ctx: ContextTypes.DEFAULT_TYPE, update: Optional
         await ctx.bot.send_message(DEFAULT_CHAT_ID, f"⏰ Reminder: Please vote on the Sunday Service poll for {date_txt}.")
 
 async def remind_cell_group(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None):
-    now = datetime.now(SGT); date_txt = format_date_plain(friday_for_reminder(now))
+    now = datetime.now(SGT)
+    # If called by scheduler (update is None), allow only Mon 18:00, Thu 18:00, Fri 15:00
+    if update is None:
+        wk, hr = now.weekday(), now.hour
+        if not ((wk == 0 and hr == 18) or (wk == 3 and hr == 18) or (wk == 4 and hr == 15)):
+            logging.info(f"Suppressed CG reminder off-window: {now.isoformat()}")
+            return
+    date_txt = format_date_plain(friday_for_reminder(now))
     ref = STATE.get("cg_poll")
     if isinstance(ref, PollRef):
         await ctx.bot.send_message(ref.chat_id, f"⏰ Reminder: Please vote on the Cell Group poll above for {date_txt}.",
@@ -269,28 +284,27 @@ def catchup_on_start(app: Application):
     now = datetime.now(SGT)
     jq = app.job_queue
 
-    # Poll catch-up (unchanged)
+    # Poll catch-up
     if STATE.get("cg_poll") is None:
-        # if Sunday 18:00 already passed this week, post once
-        days_to_sun = (6 - now.weekday()) % 7
+        days_to_sun = (6 - now.weekday()) % 7  # 6 = Sunday
         sun_target = datetime(now.year, now.month, now.day, 18, 0, tzinfo=SGT) + timedelta(days=days_to_sun)
         if now > sun_target:
             jq.run_once(send_cell_group_poll, when=2, name="CATCHUP_CG_POLL")
     if STATE.get("svc_poll") is None:
-        days_to_fri = (4 - now.weekday()) % 7
+        days_to_fri = (4 - now.weekday()) % 7  # 4 = Friday
         fri_target = datetime(now.year, now.month, now.day, 23, 30, tzinfo=SGT) + timedelta(days=days_to_fri)
         if now > fri_target:
             jq.run_once(send_sunday_service_poll, when=2, name="CATCHUP_SVC_POLL")
 
-    # 🔔 Reminder catch-up (new): if we started after today's slot, fire once now
+    # Reminder catch-up (fires only on the correct weekday after the slot)
     def _maybe_catchup(weekday: int, hh: int, mm: int, job, name: str):
         if now.weekday() == weekday and now.time() >= time(hh, mm):
             jq.run_once(job, when=3, name=name)
 
-    _maybe_catchup(Days.MONDAY,    18, 0, remind_cell_group,    "CATCHUP_CG_MON_1800")
-    _maybe_catchup(Days.THURSDAY,  18, 0, remind_cell_group,    "CATCHUP_CG_THU_1800")
-    _maybe_catchup(Days.FRIDAY,    15, 0, remind_cell_group,    "CATCHUP_CG_FRI_1500")
-    _maybe_catchup(Days.SATURDAY,  12, 0, remind_sunday_service,"CATCHUP_SVC_SAT_1200")
+    _maybe_catchup(Days.MONDAY,    18, 0, remind_cell_group,     "CATCHUP_CG_MON_1800")
+    _maybe_catchup(Days.THURSDAY,  18, 0, remind_cell_group,     "CATCHUP_CG_THU_1800")
+    _maybe_catchup(Days.FRIDAY,    15, 0, remind_cell_group,     "CATCHUP_CG_FRI_1500")
+    _maybe_catchup(Days.SATURDAY,  12, 0, remind_sunday_service, "CATCHUP_SVC_SAT_1200")
 
 # ---------- Startup helpers ----------
 async def _startup_ping(ctx: ContextTypes.DEFAULT_TYPE):
