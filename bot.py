@@ -173,7 +173,7 @@ async def remind_sunday_service(ctx: ContextTypes.DEFAULT_TYPE, update: Optional
     now = datetime.now(SGT)
     # If called by scheduler (update is None), enforce Sat 12:00 only
     if update is None:
-        if not (now.weekday() == 5 and now.hour == 12):  # Saturday 12:00
+        if not (now.weekday() == 5 and now.hour == 12):
             logging.info(f"Suppressed Service reminder off-window: {now.isoformat()}")
             return
     date_txt = format_date_plain(sunday_for_reminder(now))
@@ -223,6 +223,23 @@ async def when_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"• Service reminder: {next_rs:%a %d %b %Y %H:%M}"
     )
 
+# ---------- /jobs helper ----------
+async def jobs_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    jobs = ctx.job_queue.jobs()
+    if not jobs:
+        await update.message.reply_text("No scheduled jobs.")
+        return
+    now = datetime.now(SGT)
+    lines = []
+    for j in jobs:
+        if j.next_t:
+            next_local = j.next_t.astimezone(SGT) if j.next_t.tzinfo else j.next_t.replace(tzinfo=timezone.utc).astimezone(SGT)
+            delta = (next_local - now).total_seconds()
+            lines.append(f"• {j.name} → {next_local:%a %d %b %Y %H:%M:%S} (in {int(delta)}s)")
+        else:
+            lines.append(f"• {j.name} → n/a")
+    await update.message.reply_text("🧰 Pending jobs:\n" + "\n".join(lines))
+
 # ---------- Commands ----------
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -241,6 +258,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/sunpoll → post Service poll (in this chat)\n"
         "/sunrm → reminder for last Service poll\n"
         "/when → show next scheduled times\n"
+        "/jobs → list scheduled jobs\n"
         "/testpoll → test poll\n"
         "/id → show chat id"
     )
@@ -323,6 +341,7 @@ async def _register_commands(ctx: ContextTypes.DEFAULT_TYPE):
             BotCommand("sunpoll", "Post Sunday Service poll"),
             BotCommand("sunrm", "Reminder for last Sunday Service poll"),
             BotCommand("when", "Show next scheduled times"),
+            BotCommand("jobs", "List scheduled jobs"),
             BotCommand("testpoll", "Post a test Yes/No poll"),
             BotCommand("id", "Show chat id"),
         ]
@@ -345,6 +364,7 @@ def main():
     app.add_handler(CommandHandler("sunpoll", sunpoll_cmd))
     app.add_handler(CommandHandler("sunrm", sunrm_cmd))
     app.add_handler(CommandHandler("when", when_cmd))
+    app.add_handler(CommandHandler("jobs", jobs_cmd))
     app.add_handler(CommandHandler("testpoll", testpoll_cmd))
     app.add_handler(CommandHandler("id", id_cmd))
     app.add_error_handler(error_handler)
