@@ -2,11 +2,13 @@ import os, json, logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time, timezone
 from typing import Optional, Dict, Tuple
+import time as _time
 
 # ---- Telegram imports (and version log) ----
 import telegram
 from telegram import Update, BotCommand
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, Defaults
+from telegram.request import HTTPXRequest
 
 # Try to import Days enum (PTB v20+). Fallback to integers if unavailable.
 try:
@@ -81,10 +83,10 @@ def next_or_same_weekday_date(now_dt: datetime, weekday: int):
     days_ahead = (weekday - now_dt.weekday()) % 7
     return (now_dt + timedelta(days=days_ahead)).date()
 
-def upcoming_friday_for_poll(now_dt: datetime):  # question date for CG poll
+def upcoming_friday_for_poll(now_dt: datetime):   # CG poll question date
     return next_weekday_date_exclusive(now_dt, 4)
 
-def upcoming_sunday_for_poll(now_dt: datetime):  # question date for Service poll
+def upcoming_sunday_for_poll(now_dt: datetime):   # Service poll question date
     return next_weekday_date_exclusive(now_dt, 6)
 
 def friday_for_reminder(now_dt: datetime):
@@ -153,7 +155,7 @@ async def _send_svc_poll(ctx: ContextTypes.DEFAULT_TYPE, target_chat: int, targe
     _save_state()
     await _safe_pin(ctx, target_chat, msg.message_id)
 
-# Scheduler uses force=False; manual commands pass force=True
+# ---------- Sending functions (scheduler uses force=False; manual can force=True) ----------
 async def send_sunday_service_poll(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None, *, force: bool = False):
     now = datetime.now(SGT)
     if not force and now.weekday() != 4:  # Friday
@@ -168,12 +170,11 @@ async def send_cell_group_poll(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[
         return
     await _send_cg_poll(ctx, _effective_target_chat(update), upcoming_friday_for_poll(now))
 
-# ---------- Reminders (with weekday/time guards for scheduler) ----------
+# ---------- Reminders (weekday/time guards for scheduler; manual allowed anytime) ----------
 async def remind_sunday_service(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None):
     now = datetime.now(SGT)
-    # If called by scheduler (update is None), enforce Sat 12:00 only
-    if update is None:
-        if not (now.weekday() == 5 and now.hour == 12):
+    if update is None:  # scheduler-call guard
+        if not (now.weekday() == 5 and now.hour == 12):  # Saturday 12:00
             logging.info(f"Suppressed Service reminder off-window: {now.isoformat()}")
             return
     date_txt = format_date_plain(sunday_for_reminder(now))
@@ -186,8 +187,7 @@ async def remind_sunday_service(ctx: ContextTypes.DEFAULT_TYPE, update: Optional
 
 async def remind_cell_group(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None):
     now = datetime.now(SGT)
-    # If called by scheduler (update is None), allow only Mon 18:00, Thu 18:00, Fri 15:00
-    if update is None:
+    if update is None:  # scheduler-call guard
         wk, hr = now.weekday(), now.hour
         if not ((wk == 0 and hr == 18) or (wk == 3 and hr == 18) or (wk == 4 and hr == 15)):
             logging.info(f"Suppressed CG reminder off-window: {now.isoformat()}")
@@ -233,9 +233,9 @@ async def jobs_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = []
     for j in jobs:
         if j.next_t:
-            next_local = j.next_t.astimezone(SGT) if j.next_t.tzinfo else j.next_t.replace(tzinfo=timezone.utc).astimezone(SGT)
-            delta = (next_local - now).total_seconds()
-            lines.append(f"• {j.name} → {next_local:%a %d %b %Y %H:%M:%S} (in {int(delta)}s)")
+            next_local = j.next_t.astimezone(SGT)
+            delta = int((next_local - now).total_seconds())
+            lines.append(f"• {j.name} → {next_local:%a %d %b %Y %H:%M:%S} (in {delta}s)")
         else:
             lines.append(f"• {j.name} → n/a")
     await update.message.reply_text("🧰 Pending jobs:\n" + "\n".join(lines))
@@ -284,37 +284,34 @@ async def id_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     await update.message.reply_text(f"Chat type: {chat.type}\nChat ID: {chat.id}")
 
-# ---------- Scheduler ----------
+# ---------- Weekly Scheduler ----------
 def schedule_jobs(app: Application):
     jq = app.job_queue
-    # CG weekly
     jq.run_daily(send_cell_group_poll, time=time(18, 0, tzinfo=SGT), days=(Days.SUNDAY,))
     jq.run_daily(remind_cell_group,    time=time(18, 0, tzinfo=SGT), days=(Days.MONDAY,))
     jq.run_daily(remind_cell_group,    time=time(18, 0, tzinfo=SGT), days=(Days.THURSDAY,))
     jq.run_daily(remind_cell_group,    time=time(15, 0, tzinfo=SGT), days=(Days.FRIDAY,))
-    # Service weekly
     jq.run_daily(send_sunday_service_poll, time=time(23, 30, tzinfo=SGT), days=(Days.FRIDAY,))
     jq.run_daily(remind_sunday_service,    time=time(12,  0, tzinfo=SGT), days=(Days.SATURDAY,))
 
-# ---------- Catch-up on start (polls + reminders) ----------
+# ---------- Catch-up on start ----------
 def catchup_on_start(app: Application):
     _load_state()
     now = datetime.now(SGT)
     jq = app.job_queue
 
-    # Poll catch-up
     if STATE.get("cg_poll") is None:
-        days_to_sun = (6 - now.weekday()) % 7  # 6 = Sunday
+        days_to_sun = (6 - now.weekday()) % 7
         sun_target = datetime(now.year, now.month, now.day, 18, 0, tzinfo=SGT) + timedelta(days=days_to_sun)
         if now > sun_target:
             jq.run_once(send_cell_group_poll, when=2, name="CATCHUP_CG_POLL")
+
     if STATE.get("svc_poll") is None:
-        days_to_fri = (4 - now.weekday()) % 7  # 4 = Friday
+        days_to_fri = (4 - now.weekday()) % 7
         fri_target = datetime(now.year, now.month, now.day, 23, 30, tzinfo=SGT) + timedelta(days=days_to_fri)
         if now > fri_target:
             jq.run_once(send_sunday_service_poll, when=2, name="CATCHUP_SVC_POLL")
 
-    # Reminder catch-up (fires only on the correct weekday after the slot)
     def _maybe_catchup(weekday: int, hh: int, mm: int, job, name: str):
         if now.weekday() == weekday and now.time() >= time(hh, mm):
             jq.run_once(job, when=3, name=name)
@@ -349,13 +346,11 @@ async def _register_commands(ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.warning(f"set_my_commands failed: {e}")
 
-# ---------- Error handler ----------
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logging.exception("Unhandled exception while handling update: %s", update, exc_info=context.error)
-
-# ---------- Main ----------
-def main():
-    app = Application.builder().token(TOKEN).build()
+# ---------- Build & Run (HTTP timeouts + SGT Defaults) ----------
+def build_app() -> Application:
+    request = HTTPXRequest(connect_timeout=20, read_timeout=30, write_timeout=30, pool_timeout=30)
+    defaults = Defaults(tzinfo=SGT)
+    app = Application.builder().token(TOKEN).request(request).defaults(defaults).build()
 
     # Commands
     app.add_handler(CommandHandler("start", start))
@@ -373,12 +368,28 @@ def main():
     schedule_jobs(app)
     catchup_on_start(app)
 
-    # Startup confirmation + ensure commands visible in Telegram UI
+    # Startup confirmations
     app.job_queue.run_once(_startup_ping, when=1, name="STARTUP_PING")
     app.job_queue.run_once(_register_commands, when=2, name="REGISTER_COMMANDS")
+    return app
 
-    logging.info("Bot starting…")
-    app.run_polling(drop_pending_updates=True)
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logging.exception("Unhandled exception while handling update: %s", update, exc_info=context.error)
+
+def main():
+    backoff = 10
+    while True:
+        try:
+            app = build_app()
+            logging.info("Bot starting…")
+            app.run_polling(drop_pending_updates=True)
+            break
+        except telegram.error.TimedOut as e:
+            logging.warning(f"Telegram API timed out at startup; retrying in {backoff}s: {e}")
+            _time.sleep(backoff)
+        except Exception as e:
+            logging.exception(f"Fatal error; retrying in {backoff}s")
+            _time.sleep(backoff)
 
 if __name__ == "__main__":
     main()
