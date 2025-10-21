@@ -2,13 +2,11 @@ import os, json, logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time, timezone
 from typing import Optional, Dict, Tuple
-import time as _time
 
 # ---- Telegram imports (and version log) ----
 import telegram
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram.request import HTTPXRequest
 
 # Try to import Days enum (PTB v20+). Fallback to integers if unavailable.
 try:
@@ -235,10 +233,9 @@ async def jobs_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = []
     for j in jobs:
         if j.next_t:
-            # PTB stores next_t as aware UTC; show in SGT
-            next_local = j.next_t.astimezone(SGT)
-            delta = int((next_local - now).total_seconds())
-            lines.append(f"• {j.name} → {next_local:%a %d %b %Y %H:%M:%S} (in {delta}s)")
+            next_local = j.next_t.astimezone(SGT) if j.next_t.tzinfo else j.next_t.replace(tzinfo=timezone.utc).astimezone(SGT)
+            delta = (next_local - now).total_seconds()
+            lines.append(f"• {j.name} → {next_local:%a %d %b %Y %H:%M:%S} (in {int(delta)}s)")
         else:
             lines.append(f"• {j.name} → n/a")
     await update.message.reply_text("🧰 Pending jobs:\n" + "\n".join(lines))
@@ -352,15 +349,13 @@ async def _register_commands(ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.warning(f"set_my_commands failed: {e}")
 
-# ---------- Build & Run with robust HTTP timeouts and retry ----------
-def build_app() -> Application:
-    request = HTTPXRequest(
-        connect_timeout=20,
-        read_timeout=30,
-        write_timeout=30,
-        pool_timeout=30,
-    )
-    app = Application.builder().token(TOKEN).request(request).build()
+# ---------- Error handler ----------
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logging.exception("Unhandled exception while handling update: %s", update, exc_info=context.error)
+
+# ---------- Main ----------
+def main():
+    app = Application.builder().token(TOKEN).build()
 
     # Commands
     app.add_handler(CommandHandler("start", start))
@@ -378,28 +373,12 @@ def build_app() -> Application:
     schedule_jobs(app)
     catchup_on_start(app)
 
-    # Startup confirmations
+    # Startup confirmation + ensure commands visible in Telegram UI
     app.job_queue.run_once(_startup_ping, when=1, name="STARTUP_PING")
     app.job_queue.run_once(_register_commands, when=2, name="REGISTER_COMMANDS")
-    return app
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logging.exception("Unhandled exception while handling update: %s", update, exc_info=context.error)
-
-def main():
-    backoff = 10  # seconds
-    while True:
-        try:
-            app = build_app()
-            logging.info("Bot starting…")
-            app.run_polling(drop_pending_updates=True)
-            break  # clean exit
-        except telegram.error.TimedOut as e:
-            logging.warning(f"Telegram API timed out at startup; retrying in {backoff}s: {e}")
-            _time.sleep(backoff)
-        except Exception as e:
-            logging.exception(f"Fatal error; retrying in {backoff}s")
-            _time.sleep(backoff)
+    logging.info("Bot starting…")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
