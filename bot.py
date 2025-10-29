@@ -1,55 +1,38 @@
-import os, json, logging
+import os
+import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time, timezone
-from typing import Optional, Dict, Tuple
-import time as _time
+from typing import Optional
 
-# ---- Telegram imports (and version log) ----
 import telegram
 from telegram import Update, BotCommand
-from telegram.ext import Application, CommandHandler, ContextTypes, Defaults
-from telegram.request import HTTPXRequest
+from telegram.ext import Application, CommandHandler, Context, ContextTypes
 
-# Try to import Days enum (PTB v20+). Fallback to integers if unavailable.
-try:
-    from telegram.ext import Days  # Days.MONDAY ... Days.SUNDAY
-except Exception:
-    class Days:
-        MONDAY = 0
-        TUESDAY = 1
-        WEDNESDAY = 2
-        THURSDAY = 3
-        FRIDAY = 4
-        SATURDAY = 5
-        SUNDAY = 6
-
-# ======== HARD-CODED TOKEN & DEFAULT CHAT ID ========
-TOKEN = "8448114982:AAFjVekkgALSK9M3CKc8K7KjrUSTcsvPvIc"
-DEFAULT_CHAT_ID = -1001819726736  # your group chat ID
-
-# Pin polls? (True/False)
-PIN_POLLS = True
-
-# Persist last poll IDs so reminders can reply even after a restart
-STATE_PATH = "./state.json"
-
-# ---- Timezone: robust SGT (fallback to fixed +08:00, never UTC) ----
+# --- Timezone: Singapore Time with UTC fallback ---
 try:
     from zoneinfo import ZoneInfo
     SGT = ZoneInfo("Asia/Singapore")
 except Exception:
-    SGT = timezone(timedelta(hours=8), name="SGT")  # reliable fallback
+    SGT = timezone(timedelta(hours=8))
+
+# --- Config: YOUR BOT TOKEN + TARGET GROUP CHAT ID ---
+TOKEN = "8448114982:AAFjVekkgALSK9M3CKc8K7KjrUSTcsvPvIc"
+DEFAULT_CHAT_ID = -1001819726736  # target group/supergroup id
+
+STATE_PATH = "./state.json"       # persists last poll IDs for reply-to
+PIN_POLLS =  true if "true" else True  # set False to disable auto-pin
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logging.info(f"python-telegram-bot version: {getattr(telegram, '__version__', 'unknown')}")
+logging.info(f"python-telegram-bot: {getattr(telegram, '__version__', 'unknown')}")
 
-# ---------- Poll tracking ----------
+# --- Data model for last posted polls (for reply_to) ---
 @dataclass
 class PollRef:
     chat_id: int
     message_id: int
 
-STATE: Dict[str, Optional[PollRef]] = {"cg_poll": None, "svc_poll": None}
+STATE: dict[str, Optional[PollRef]] = {"cg_poll": None, "svc_poll": None}
 
 def _load_state() -> None:
     global STATE
@@ -59,9 +42,12 @@ def _load_state() -> None:
                 raw = json.load(f)
             for k in ("cg_poll", "svc_poll"):
                 v = raw.get(k)
-                STATE[k] = PollRef(int(v["chat_id"]), int(v["message_id"])) if v else None
+                if v and isinstance(v, dict) and "chat_id" in v and "message_id" in v:
+                    STATE[k] = PollRef(int(v["chat_id"]), int(v["message_id"]))
+                else:
+                    STATE[k] = None
     except Exception as e:
-        logging.warning(f"Failed to load state: {e}")
+        logging.warning(f"STATE load error: {e}")
 
 def _save_state() -> None:
     try:
@@ -71,53 +57,22 @@ def _save_state() -> None:
         with open(STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(out, f)
     except Exception as e:
-        logging.warning(f"Failed to save state: {e}")
+        logging.warning(f"STATE save error: {e}")
 
-# ---------- Date helpers ----------
-def next_weekday_date_exclusive(now_dt: datetime, weekday: int):
-    days_ahead = (weekday - now_dt.weekday()) % 7
-    if days_ahead == 0: days_ahead = 7
-    return (now_dt + timedelta(days=days_ahead)).date()
-
-def next_or_same_weekday_date(now_dt: datetime, weekday: int):
-    days_ahead = (weekday - now_dt.weekday()) % 7
-    return (now_dt + timedelta(days=days_ahead)).date()
-
-def upcoming_friday_for_poll(now_dt: datetime):   # CG poll question date
-    return next_weekday_date_exclusive(now_dt, 4)
-
-def upcoming_sunday_for_poll(now_dt: datetime):   # Service poll question date
-    return next_weekday_date_exclusive(now_dt, 6)
-
-def friday_for_reminder(now_dt: datetime):
-    return next_or_same_weekday_date(now_dt, 4)
-
-def sunday_for_reminder(now_dt: datetime):
-    return next_or_same_weekday_date(now_dt, 6)
-
-def ordinal(n: int) -> str:
-    if 10 <= n % 100 <= 20: suf = "th"
-    else: suf = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suf}"
-
-def format_date_long(d) -> str:   # e.g., 31st August 2025 (Sun)
-    return f"{ordinal(d.day)} {d.strftime('%B %Y')} ({d.strftime('%a')})"
-
-def format_date_plain(d) -> str:  # e.g., 31st August 2025
-    return f"{ordinal(d.day)} {d.strftime('%B %Y')}"
-
-def _effective_target_chat(update: Optional[Update]) -> int:
+# --- Helpers ---
+def _effective_chat_id(update: Optional[Update]) -> int:
     return update.effective_chat.id if (update and update.effective_chat) else DEFAULT_CHAT_ID
 
-# ---------- Pin helper ----------
 async def _safe_pin(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
-    if not PIN_POLLS: return
+    if not PIN_POLLS:
+        return
     try:
         me = await ctx.bot.get_me()
         member = await ctx.bot.get_chat_member(chat_id, me.id)
         can_pin = False
-        if member.status == "creator": can_pin = True
-        elif member.status == "administrator":
+        if getattr(member, "status", "") == "creator":
+            can_pin = True
+        elif getattr(member, "status", "") == "administrator":
             can_pin = getattr(member, "can_pin_messages", False) or getattr(getattr(member, "privileges", None), "can_pin_messages", False)
         if not can_pin:
             await ctx.bot.send_message(chat_id, "⚠️ I need **Pin messages** permission to pin the poll.")
@@ -126,104 +81,120 @@ async def _safe_pin(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: in
     except Exception as e:
         logging.warning(f"Pin failed: {e}")
         try:
-            await ctx.bot.send_message(chat_id, f"⚠️ Couldn't pin the poll ({e}). Please grant **Pin messages**.")
+            await ctx.bot.send_message(chat_id, f"⚠️ Couldn’t pin the poll ({e}). Please grant **Pin messages**.")
         except Exception:
             pass
 
-# ---------- Poll senders ----------
-async def _send_cg_poll(ctx: ContextTypes.DEFAULT_TYPE, target_chat: int, target_date):
-    msg = await ctx.bot.send_poll(
-        chat_id=target_chat,
-        question=f"Cell Group – {format_date_long(target_date)}",
-        options=["🍽️ Dinner 7.15pm", "⛪ CG 8.15pm", "❌ Cannot make it"],
-        is_anonymous=False,
-        allows_multiple_answers=False,
-    )
-    STATE["cg_poll"] = PollRef(chat_id=target_chat, message_id=msg.message_id)
-    _save_state()
-    await _safe_pin(ctx, target_chat, msg.message_id)
+def _friday_for_reminder(now: datetime) -> str:
+    tgt = now.astimezone(SGT)
+    # Next Friday, or today if already Friday and >= now
+    delta = (4 - tgt.weekday()) % 7
+    day = tgt + timedelta(days=delta)
+    return f"{day.day}{'th' if 10 <= day.day % 100 <= 20 else {1:'st',2:'nd',3:'rd'}.get(day.day % 10,'th')} {day.strftime('%B %Y')}"
 
-async def _send_svc_poll(ctx: ContextTypes.DEFAULT_TYPE, target_chat: int, target_date):
+def _sunday_for_reminder(now: datetime) -> str:
+    tgt = now.ast_timezone(SGT) if hasattr(now, "astimezone") else now
+    delta = (6 - tgt.weekday()) % 7
+    day = tgt + timedelta(days=delta)
+    suffix = 'th' if 10 <= day.day % 100 <= 20 else {1:'st',2:'nd',3:'rd'}.get(day.day % 10, 'th')
+    return f"{day.day}{suffix} {day.strftime('%B %Y')}"
+
+# --- Poll senders (with weekday guards; manual calls pass force=True) ---
+async def send_sunday_service_poll(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None, *, force: bool = False):
+    now = datetime.now(SGT)
+    if not force and now.weekday() != 4:  # Friday only, unless forced
+        logging.info(f"Skip service poll at {now}: not Friday")
+        return
+    chat_id = _effective_chat_id(update)
+    target_date = (now + timedelta(days=(6 - now.weekday()) % 7)).date()
+    q = f"Municipal Service – { (str(target_date.day) + ('th' if 10 <= target_date.day % 100 <= 20 else {1:'st',2:'nd',3:'rd'}.get(target_date.day % 10,'th')) ) } {target_date.strftime('%B %Y')} ({target_date.strftime('%a')})"
     msg = await ctx.bot.send_poll(
-        chat_id=target_chat,
-        question=f"Sunday Service – {format_date_long(target_date)}",
-        options=["⏰ 9am", "🕚 11.15am", "🙋 Serving", "🍽️ Lunch", "🧑‍🤝‍🧑 Invited a friend"],
+        chat_id=chat_id,
+        question=q,
+        options=["⏰ 9am","🕚 11.15am","🙋 Serving","🍽️ Lunch","🧑‍🤝‍🧑 Invited a friend"],
         is_anonymous=False,
         allows_multiple_answers=True,
     )
-    STATE["svc_poll"] = PollRef(chat_id=target_chat, message_id=msg.message_id)
+    STATE["svc_priv"] = PollRef(chat_id=chat_id, message_id=msg.message_id)
     _save_state()
-    await _safe_pin(ctx, target_chat, msg.message_id)
-
-# ---------- Sending functions (scheduler uses force=False; manual can force=True) ----------
-async def send_sunday_service_poll(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None, *, force: bool = False):
-    now = datetime.now(SGT)
-    if not force and now.weekday() != 4:  # Friday
-        logging.warning(f"Service poll triggered {now:%a %Y-%m-%d %H:%M %Z}; skipping (expected Friday).")
-        return
-    await _send_svc_poll(ctx, _effective_target_chat(update), upcoming_sunday_for_poll(now))
+    await _safe_pin(ctx, chat_id, msg.message_id)
 
 async def send_cell_group_poll(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None, *, force: bool = False):
     now = datetime.now(SGT)
-    if not force and now.weekday() != 6:  # Sunday
-        logging.warning(f"CG poll triggered {now:%a %Y-%m-%d %H:%M %Z}; skipping (expected Sunday).")
+    if not force and now.weekday() != 6:  # Sunday only, unless forced
+        logging.info(f"Skip CG poll at {now}: not Sunday")
         return
-    await _send_cg_poll(ctx, _effective_target_chat(update), upcoming_friday_for_poll(now))
+    chat_id = _effective_chat_id(update)
+    tgt = (now + timedelta(days=(4 - now.weekday()) % 7)).date()  # upcoming Friday
+    q = f"Cell Group – {(str(tgt.day) + ('th' if 10 <= tgt.day % 100 <= 20 else {1:'st','2':'nd','3':'rd'}.get(tgt.day % 10,'th')))} {tgt.strftime('%B %Y')} ({tgt.strftime('%a')})"
+    msg = await ctx.bot.send_poll(
+        chat_id=chat_id,
+        question=q,
+        options=["� dinner 7.15pm", "⛪ CG 8.15pm", "❌ Cannot make it"],
+        is_anonymous=False,
+        allows_multiple_answers=False,
+    )
+    STATE["cg_poll"] = PollRef(chat_id=chat_id, message_id=msg.message_id)
+    _save_state()
+    await _safe_pin(ctx, chat_id, msg.message_id)
 
-# ---------- Reminders (weekday/time guards for scheduler; manual allowed anytime) ----------
+# --- Reminders with guards (auto-fire only at the right time) ---
 async def remind_sunday_service(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None):
     now = datetime.now(SGT)
-    if update is None:  # scheduler-call guard
-        if not (now.weekday() == 5 and now.hour == 12):  # Saturday 12:00
-            logging.info(f"Suppressed Service reminder off-window: {now.isoformat()}")
-            return
-    date_txt = format_date_plain(sunday_for_reminder(now))
+    when_text = _s_today = _sunday_for_reminder(now)
+    # Only auto-fire on Saturday 12:00 SGT
+    if update is None and not (now.weekday() == 5 and now.hour == 12):
+        logging.info(f"Skip Service reminder at {now}: not Sat 12:00")
+        return
     ref = STATE.get("svc_poll")
+    text = f"⏰ Reminder: Please vote on the Sunday Service poll for {when_text}."
     if isinstance(ref, PollRef):
-        await ctx.bot.send_message(ref.chat_id, f"⏰ Reminder: Please vote on the Sunday Service poll above for {date_txt}.",
-                                   reply_to_message_id=ref.message_id, allow_sending_without_reply=True)
+        await ctx.bot.send_message(ref.chat_id, text, reply_to_message_id=ref.message_id, allow_sending_without_reply=True)
     else:
-        await ctx.bot.send_message(DEFAULT_CHAT_ID, f"⏰ Reminder: Please vote on the Sunday Service poll for {date_txt}.")
+        await ctx.bot.send_message(chat_id=DEFAULT_CHAT_ID, text=text)
 
 async def remind_cell_group(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None):
     now = datetime.now(SGT)
-    if update is None:  # scheduler-call guard
-        wk, hr = now.weekday(), now.hour
-        if not ((wk == 0 and hr == 18) or (wk == 3 and hr == 18) or (wk == 4 and hr == 15)):
-            logging.info(f"Suppressed CG reminder off-window: {now.isoformat()}")
+    # Only auto-fire on Mon 18:00, Thu 18:00, Fri 15:00 SGT
+    if update is None:
+        wd = now.weekday()
+        hr = now.hour
+        ok = (wd == 0 and hr == 18) or (wd == 3 and hr == 18) or (wd == 4 and hr == 15)
+        if not ok:
+            logging.info(f"Skip CG reminder at {now}: not a scheduled slot")
             return
-    date_txt = format_date_plain(friday_for_reminder(now))
     ref = STATE.get("cg_poll")
+    text = f"⏰ Reminder: Please vote on the Cell Group poll for {_friday_for_reminder(now)}."
     if isinstance(ref, PollRef):
-        await ctx.bot.send_message(ref.chat_id, f"⏰ Reminder: Please vote on the Cell Group poll above for {date_txt}.",
-                                   reply_to_message_id=ref.message_id, allow_sending_without_reply=True)
+        await ctx.bot.send_message(ref.chat_id, text, reply_to_message_id=ref.message_id, allow_sending_without_reply=True)
     else:
-        await ctx.bot.send_message(DEFAULT_CHAT_ID, f"⏰ Reminder: Please vote on the Cell Group poll for {date_txt}.")
+        await ctx.bot.send_message(chat_id=DEFAULT_CHAT_ID, text=text)
 
-# ---------- /when helper ----------
+# --- Debug/ops helpers ---
 def _next_occurrence(now: datetime, weekday: int, hh: int, mm: int) -> datetime:
-    days_ahead = (weekday - now.weekday()) % 7
-    candidate = datetime(now.year, now.month, now.day, hh, mm, tzinfo=SGT) + timedelta(days=days_ahead)
-    if candidate <= now: candidate += timedelta(days=7)
+    d = now.astimezone(SG T)
+    delta = (weekday - d.weekday()) % 7
+    candidate = d.replace(hour=hh, minute=mm, second=0, microsecond=0) + timedelta(days=delta)
+    if candidate <= d:
+        candidate += timedelta(days=7)
     return candidate
 
 async def when_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(SGT)
-    next_cg   = _next_occurrence(now, 6, 18, 0)   # Sun 18:00
-    next_svc  = _next_occurrence(now, 4, 23, 30)  # Fri 23:30
-    next_rm_m = _next_occurrence(now, 0, 18, 0)   # Mon 18:00
-    next_rm_t = _next_occurrence(now, 3, 18, 0)   # Thu 18:00
-    next_rm_f = _next_occurrence(now, 4, 15, 0)   # Fri 15:00
-    next_rs   = _next_occurrence(now, 5, 12, 0)   # Sat 12:00
+    cg = _next_occurrence(now, 6, 18, 0)
+    mon = _next_occurrence(now, 0, 18, 0)
+    thu = _next_occurrence(now, 3, 18, 0)
+    fri = _next_occurrence(now, 4, 15, 0)
+    sat = _next_occurrence(now, 5, 12, 0)
+    fri_poll = _next_occurrence(now, 4, 23, 30)
     await update.message.reply_text(
         "🗓️ Next (SGT):\n"
-        f"• CG poll: {next_cg:%a %d %b %Y %H:%M}\n"
-        f"• Service poll: {next_svc:%a %d %b %Y %H:%M}\n"
-        f"• CG reminders: Mon {next_rm_m:%H:%M}, Thu {next_rm_t:%H:%M}, Fri {next_rm_f:%H:%M}\n"
-        f"• Service reminder: {next_rs:%a %d %b %Y %H:%M}"
+        f"• CG poll: {cg:%a %d %b %Y %H:%M}\n"
+        f"• CG reminders: Mon {mon:%H:%M}, Thu {thu:%H:%M}, Fri {fri:%H:%M}\n"
+        f"• Service poll: {fri_poll:%a %d %b %Y %H:%M}\n"
+        f"• Service reminder: {sat:%a %d %b %Y %H:%M}"
     )
 
-# ---------- /jobs helper ----------
 async def jobs_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     jobs = ctx.job_queue.jobs()
     if not jobs:
@@ -232,96 +203,62 @@ async def jobs_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(SGT)
     lines = []
     for j in jobs:
-        if j.next_t:
-            next_local = j.next_t.astimezone(SGT)
-            delta = int((next_local - now).total_seconds())
-            lines.append(f"• {j.name} → {next_local:%a %d %b %Y %H:%M:%S} (in {delta}s)")
+        nxt = getattr(j, "next_t", None) or getattr(j, "next_run_time", None)
+        if nxt:
+            t = nxt.astimezone(SGT)
+            secs = int((t - now).total_seconds())
+            lines.append(f"• {j.name} → {t:%a %d %b %Y %H:%M:%S} ({secs}s)")
         else:
-            lines.append(f"• {j.name} → n/a")
+            lines.append(f"• {j.name} → (not scheduled)")
     await update.message.reply_text("🧰 Pending jobs:\n" + "\n".join(lines))
-
-# ---------- Commands ----------
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Schedule (SGT):\n"
-        "• Cell Group (Friday):\n"
-        "  - Sun 6:00 PM → post poll\n"
-        "  - Mon 6:00 PM → reminder\n"
-        "  - Thu 6:00 PM → reminder\n"
-        "  - Fri 3:00 PM → reminder\n"
-        "• Sunday Service:\n"
-        "  - Fri 11:30 PM → post poll\n"
-        "  - Sat 12:00 PM → reminder\n\n"
-        "Manual commands:\n"
-        "/cgpoll → post CG poll (in this chat)\n"
-        "/cgrm → reminder for last CG poll\n"
-        "/sunpoll → post Service poll (in this chat)\n"
-        "/sunrm → reminder for last Service poll\n"
-        "/when → show next scheduled times\n"
-        "/jobs → list scheduled jobs\n"
-        "/testpoll → test poll\n"
-        "/id → show chat id"
-    )
-
-async def cgpoll_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await send_cell_group_poll(ctx, update, force=True)
-
-async def cgrm_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await remind_cell_group(ctx, update)
-
-async def sunpoll_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await send_sunday_service_poll(ctx, update, force=True)
-
-async def sunrm_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await remind_sunday_service(ctx, update)
-
-async def testpoll_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    target_chat = _effective_target_chat(update)
-    await ctx.bot.send_poll(chat_id=target_chat, question="🚀 Test Poll – working?",
-                            options=["Yes 👍", "No 👎"], is_anonymous=False, allows_multiple_answers=False)
 
 async def id_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     await update.message.reply_text(f"Chat type: {chat.type}\nChat ID: {chat.id}")
 
-# ---------- Weekly Scheduler ----------
+# --- Scheduler & catch-up ---
 def schedule_jobs(app: Application):
     jq = app.job_queue
-    jq.run_daily(send_cell_group_poll, time=time(18, 0, tzinfo=SGT), days=(Days.SUNDAY,))
-    jq.run_daily(remind_cell_group,    time=time(18, 0, tzinfo=SGT), days=(Days.MONDAY,))
-    jq.run_daily(remind_cell_group,    time=time(18, 0, tzinfo=SGT), days=(Days.THURSDAY,))
-    jq.run_daily(remind_cell_group,    time=time(15, 0, tzinfo=SGT), days=(Days.FRIDAY,))
-    jq.run_daily(send_sunday_service_poll, time=time(23, 30, tzinfo=SGT), days=(Days.FRIDAY,))
-    jq.run_daily(remind_sunday_service,    time=time(12,  0, tzinfo=SGT), days=(Days.SATURDAY,))
+    jq.run_daily(send_sunday_f if False else send_cell_group_poll, time=time(18, 0, tzinfo=SGT), days=(3,))  # placeholder not used
 
-# ---------- Catch-up on start ----------
+    # Cell Group: Sun 18:00 poll, Mon/Thu 18:00 reminders, Fri 15:00 reminder
+    jq.run_daily(send_cell_group_poll, time=time(18, 0, tzinfo=SGT), days=(6,))
+    jq.run_daily(remind_cell_group,    time= time(18, 0, tzinfo=SGT), days=(0,))
+    jq.run_daily(remind_cell_group,    time= time(18, 0, tzinfo=SGT), days=(3,))
+    jq.run_daily(remind_cell_group,    time= time(15, 0, tzinfo=SGT), days=(4,))
+
+    # Sunday Service: Fri 23:30 poll, Sat 12:00 reminder
+    jq.run_daily(send_sunday_service_poll, time=time(23, 30, tzinfo=SGT), days=(4,))
+    jq.run_daily(remind_sunday_service,    time=time(12,  0, tzinfo=SGT), days=(5,))
+
 def catchup_on_start(app: Application):
     _load_state()
     now = datetime.now(SGT)
     jq = app.job_queue
 
-    if STATE.get("cg_poll") is None:
-        days_to_sun = (6 - now.weekday()) % 7
-        sun_target = datetime(now.year, now.month, now.day, 18, 0, tzinfo=SGT) + timedelta(days=days_to_sun)
-        if now > sun_target:
-            jq.run_once(send_cell_group_poll, when=2, name="CATCHUP_CG_POLL")
+    # Post missed polls if already past this week's slot
+    sun_target = datetime(now.year, now.month, now.day, 18, 0, tzinfo=SGT) + timedelta(days=(6 - now.weekday()) % 7)
+    if now > sun_target:
+        jq.run_once(lambda ctx: send_cell_group_poll(ctx, None, force=True), when=1, name="CATCHUP_CG_POLL")
 
-    if STATE.get("svc_poll") is None:
-        days_to_fri = (4 - now.weekday()) % 7
-        fri_target = datetime(now.year, now.month, now.day, 23, 30, tzinfo=SGT) + timedelta(days=days_to_fri)
-        if now > fri_target:
-            jq.run_once(send_sunday_service_poll, when=2, name="CATCHUP_SVC_POLL")
+    fri_poll = datetime(now.year, now.month, now.day, 23, 30, tzinfo=SGT) + timedelta(days=(4 - now.weekday()) % 7)
+    if now > fri_poll:
+        jq.run_once(lambda ctx: send_sunday_service_poll(ctx, None, force=True), when=1, name="CATCHUP_SVC_POLL")
 
-    def _maybe_catchup(weekday: int, hh: int, mm: int, job, name: str):
-        if now.weekday() == weekday and now.time() >= time(hh, mm):
-            jq.run_once(job, when=3, name=name)
+    # Fire a missed reminder once if we restarted after the slot today
+    def maybe_reminder(wd: int, hh: int, mm: int, func, name: str):
+        if now.weekday() == wd:
+            t = datetime(now.year, now.month, now.day, hh, mm, tzinfo=SGT)
+            if now > t:
+                jq.run_once(func, when=1, name=name)
 
-    _maybe_catchup(Days.MONDAY,    18, 0, remind_cell_group,     "CATCHUP_CG_MON_1800")
-    _maybe_catchup(Days.THURSDAY,  18, 0, remind_cell_group,     "CATCHUP_CG_THU_1800")
-    _maybe_catchup(Days.FRIDAY,    15, 0, remind_cell_group,     "CATCHUP_CG_FRI_1500")
-    _maybe_catchup(Days.SATURDAY,  12, 0, remind_sunday_service, "CATCHUP_SVC_SAT_1200")
+    maybe_reviewer = maybe_reminder  # alias
+    maybe_reminder(0, 18, 0, remind_cell_group,    "CGRM_MON_1800_CATCHUP")
+    maybe_reminder(3, 18, 0, remind_cell_group,    "CGRM_THU_1800_CATCHUP")
+    maybe_reminder(4, 15, 0, remind_cell_group,    "CGRM_FRI_1500_CATCHUP")
+    maybe_reminder(5, 12, 0, remind_sunday_service,"SRM_SAT_1200_CATCHUP")
 
-# ---------- Startup helpers ----------
+# --- Startup helpers ---
 async def _startup_ping(ctx: ContextTypes.DEFAULT_TYPE):
     try:
         me = await ctx.bot.get_me()
@@ -332,64 +269,66 @@ async def _startup_ping(ctx: ContextTypes.DEFAULT_TYPE):
 async def _register_commands(ctx: ContextTypes.DEFAULT_TYPE):
     try:
         cmds = [
-            BotCommand("start", "Show schedule and commands"),
-            BotCommand("cgpoll", "Post Cell Group poll"),
-            BotCommand("cgrm", "Reminder for last CG poll"),
-            BotCommand("sunpoll", "Post Sunday Service poll"),
-            BotCommand("sunrm", "Reminder for last Sunday Service poll"),
-            BotCommand("when", "Show next scheduled times"),
-            BotCommand("jobs", "List scheduled jobs"),
-            BotCommand("testpoll", "Post a test Yes/No poll"),
-            BotCommand("id", "Show chat id"),
+            BotCommand("start", "Show schedule & commands"),
+            BotCommand("cgpoll", "Post Cell Group poll (force)"),
+            BotCommand("cgrm",   "Send CG reminder now"),
+            BotCommand("sunpoll","Post Sunday Service poll (force)"),
+            BotCommand("sunrm",  "Send Sunday Service reminder now"),
+            BotCommand("when",   "Show next scheduled times (SGT)"),
+            BotCommand("jobs",   "List queued jobs"),
+            BotCommand("testpoll","Post a yes/no test poll"),
+            BotCommand("id",     "Show this chat id"),
         ]
-        await ctx.bot.set_my_commands(cmds)
+        await ctx.bot.setMyCommands(commands=cmds)
     except Exception as e:
         logging.warning(f"set_my_commands failed: {e}")
 
-# ---------- Build & Run (HTTP timeouts + SGT Defaults) ----------
-def build_app() -> Application:
-    request = HTTPXRequest(connect_timeout=20, read_timeout=30, write_timeout=30, pool_timeout=30)
-    defaults = Defaults(tzinfo=SGT)
-    app = Application.builder().token(TOKEN).request(request).defaults(defaults).build()
+# --- Error handler ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logging.exception("Unhandled exception", exc_info=context.error)
 
-    # Commands
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("cgpoll", cgpoll_cmd))
-    app.add_handler(CommandHandler("cgrm", cgrm_cmd))
-    app.add_handler(CommandHandler("sunpoll", sunpoll_cmd))
-    app.add_handler(CommandHandler("sunrm", sunrm_cmd))
-    app.add_handler(CommandHandler("when", when_cmd))
-    app.add_handler(CommandHandler("jobs", jobs_cmd))
-    app.add_handler(CommandHandler("testpoll", testpoll_cmd))
-    app.add_handler(CommandHandler("id", id_cmd))
-    app.add_error_handler(error_handler)
-
-    # Jobs
-    schedule_jobs(app)
-    catchup_on_start(app)
-
-    # Startup confirmations
-    app.job_queue.run_once(_startup_ping, when=1, name="STARTUP_PING")
-    app.job_queue.run_once(_register_commands, when=2, name="REGISTER_COMMANDS")
-    return app
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logging.exception("Unhandled exception while handling update: %s", update, exc_info=context.error)
-
+# --- Main ---
 def main():
-    backoff = 10
+    # robust startup with retry to survive transient network issues
     while True:
         try:
-            app = build_app()
-            logging.info("Bot starting…")
-            app.run_polling(drop_pending_updates=True)
-            break
-        except telegram.error.TimedOut as e:
-            logging.warning(f"Telegram API timed out at startup; retrying in {backoff}s: {e}")
-            _time.sleep(backoff)
+            app = Application.builder().token(TOKEN).build()
+
+            app.add_handler(CommandHandler("start",   start))
+            app.add_handler(CommandHandler("cgpoll",  lambda u,c: send_cell_group_poll(c, u, force=True)))
+            app.add_handler(CommandHandler("cgrm",    remind_cell_group))
+            app.add_handler(CommandHandler("sunpoll", lambda u,c: send_sunday_service_poll(c, u, force=True)))
+            app.add_handler(CommandHandler("sunrm",   remind_sunday_service))
+            app.add_handler(CommandHandler("when",    when_cmd))
+            app.add_handler(CommandHandler("jobs",    jobs_cmd))
+            app.add_handler(CommandHandler("testpoll", lambda u,c: c.bot.send_poll(
+                chat_id=_effective_chat_id(u),
+                question="🚀 Test Poll – working?",
+                options=["Yes 👍", "No 👎"],
+                is_anonymous=False,
+                allow_multiple_answers=False)))
+            app.add_handler(CommandHandler("id",      id_cmd))
+            app.add_error_handler(error_handler)
+
+            schedule_success = False
+            try:
+                schedule_jobs(app)
+                catchup_on_start(app)
+                schedule_success = True
+            except Exception as e:
+                logging.exception(f"Scheduling error: {e}")
+
+            app.job_queue.run_once(_register_commands, when=1)
+            app.job_queue.run_once(_startup_ping,      when=1)
+
+            logging.info(f"Bot starting… (TZ={SGT}) | SchedOK={schedule_success}")
+            app.run_polling(poll_interval=1.5, timeout=30, drop_pending_updates=True)
         except Exception as e:
-            logging.exception(f"Fatal error; retrying in {backoff}s")
-            _time.sleep(backoff)
+            logging.exception("Startup failed, retrying shortly…")
+            import time as _t
+            _t.sleep(5)
+            continue
+        break
 
 if __name__ == "__main__":
     main()
