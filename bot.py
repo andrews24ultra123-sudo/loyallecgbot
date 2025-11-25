@@ -138,10 +138,10 @@ async def send_sunday_service_poll(ctx: ContextTypes.DEFAULT_TYPE, update: Optio
     await _safe_pin(ctx, chat_id, msg.message_id)
 
 
-# ===== Reminders (kept for manual /cgrm, /sunrm) =====
+# ===== Reminders (manual /cgrm, /sunrm still work) =====
 async def remind_cell_group(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None):
     now = datetime.now(SGT)
-    if update is None:  # scheduler call (currently not used)
+    if update is None:  # scheduler guard (not really used now)
         wk, hr = now.weekday(), now.hour
         if not ((wk == 0 and hr == 18) or (wk == 3 and hr == 18) or (wk == 4 and hr == 15)):
             logging.info(f"Skip CG reminder off-window: {now}")
@@ -156,7 +156,7 @@ async def remind_cell_group(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Upd
 
 async def remind_sunday_service(ctx: ContextTypes.DEFAULT_TYPE, update: Optional[Update] = None):
     now = datetime.now(SGT)
-    if update is None:  # scheduler call (currently not used)
+    if update is None:  # scheduler guard (not really used now)
         if not (now.weekday() == 5 and now.hour == 12):
             logging.info(f"Skip Service reminder off-window: {now}")
             return
@@ -172,8 +172,8 @@ async def remind_sunday_service(ctx: ContextTypes.DEFAULT_TYPE, update: Optional
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Schedule (SGT):\n"
-        "• CG poll: Tue 6:22 PM & Sun 2:00 PM\n"
-        "• Sunday Service poll: Tue 6:24 PM & Fri 11:00 PM\n\n"
+        "• CG poll: Tue 6:35 PM & Sun 2:00 PM\n"
+        "• Sunday Service poll: Tue 6:37 PM & Fri 11:00 PM\n\n"
         "Manual:\n"
         "/cgpoll /cgrm /sunpoll /sunrm /when /jobs /id"
     )
@@ -206,10 +206,9 @@ def _next_time(now: datetime, weekday: int, hh: int, mm: int) -> datetime:
 
 async def when_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(SGT)
-    # New schedule:
-    # Tue 18:22 CG, Tue 18:24 Svc, Fri 23:00 Svc, Sun 14:00 CG
-    cg_tue = _next_time(now, 1, 18, 22)   # Tuesday
-    svc_tue = _next_time(now, 1, 18, 24)
+    # Tue 18:35 CG, Tue 18:37 Svc, Fri 23:00 Svc, Sun 14:00 CG
+    cg_tue = _next_time(now, 1, 18, 35)   # Tuesday
+    svc_tue = _next_time(now, 1, 18, 37)
     svc_fri = _next_time(now, 4, 23, 0)   # Friday
     cg_sun = _next_time(now, 6, 14, 0)    # Sunday
 
@@ -246,20 +245,21 @@ async def id_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def schedule_jobs(app: Application):
     jq = app.job_queue
 
-    # Every Tuesday 18:22 SGT -> CG poll
+    # === Regular weekly polls (SGT) ===
+    # Every Tuesday 18:35 SGT -> CG poll
     jq.run_daily(
         send_cell_group_poll,
-        time=time(18, 22, tzinfo=SGT),
+        time=time(18, 35, tzinfo=SGT),
         days=(1,),  # 0=Mon,1=Tue,...,6=Sun
-        name="CG_POLL_TUE_1822",
+        name="CG_POLL_TUE_1835",
     )
 
-    # Every Tuesday 18:24 SGT -> Sunday Service poll
+    # Every Tuesday 18:37 SGT -> Sunday Service poll
     jq.run_daily(
         send_sunday_service_poll,
-        time=time(18, 24, tzinfo=SGT),
+        time=time(18, 37, tzinfo=SGT),
         days=(1,),
-        name="SVC_POLL_TUE_1824",
+        name="SVC_POLL_TUE_1837",
     )
 
     # Every Friday 23:00 SGT -> Sunday Service poll
@@ -278,13 +278,20 @@ def schedule_jobs(app: Application):
         name="CG_POLL_SUN_1400",
     )
 
+    # === One-time debug: CG poll ~10 minutes after startup ===
+    jq.run_once(
+        send_cell_group_poll,
+        when=600,   # seconds from now (about 10 minutes)
+        name="DEBUG_FIRST_CG_POLL",
+    )
+
 
 def catchup_on_start(app: Application):
-    # Only load state; no catch-up jobs with the old schedule
+    # Only load state; no old catch-up logic
     _load_state()
 
 
-# ===== Post-init (reliable startup ping & commands) =====
+# ===== Post-init (startup ping & commands) =====
 async def post_init(app: Application):
     try:
         me = await app.bot.get_me()
@@ -346,7 +353,6 @@ def main():
         except Exception as e:
             logging.exception("Startup failed; retrying…")
             import time as _t
-
             _t.sleep(backoff)
 
 
