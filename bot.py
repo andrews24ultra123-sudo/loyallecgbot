@@ -140,8 +140,8 @@ async def send_sunday_service_poll(ctx: ContextTypes.DEFAULT_TYPE, update: Optio
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Schedule (SGT):\n"
-        "• CG poll: Tue 7:07 PM & Sun 2:00 PM\n"
-        "• Sunday Service poll: Tue 7:09 PM & Fri 11:00 PM\n\n"
+        "• CG poll: Tue 7:20 PM & Sun 2:00 PM\n"
+        "• Sunday Service poll: Tue 7:22 PM & Fri 11:00 PM\n\n"
         "Manual:\n"
         "/cgpoll /sunpoll /when /jobs /id"
     )
@@ -166,10 +166,10 @@ def _next_time(now: datetime, weekday: int, hh: int, mm: int) -> datetime:
 
 async def when_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(SGT)
-    cg_tue = _next_time(now, 1, 19, 7)   # Tue 19:07
-    svc_tue = _next_time(now, 1, 19, 9)  # Tue 19:09
-    svc_fri = _next_time(now, 4, 23, 0)  # Fri 23:00
-    cg_sun = _next_time(now, 6, 14, 0)   # Sun 14:00
+    cg_tue = _next_time(now, 1, 19, 20)   # Tue 19:20
+    svc_tue = _next_time(now, 1, 19, 22)  # Tue 19:22
+    svc_fri = _next_time(now, 4, 23, 0)   # Fri 23:00
+    cg_sun = _next_time(now, 6, 14, 0)    # Sun 14:00
 
     await update.message.reply_text(
         "🗓️ Next scheduled polls (SGT):\n"
@@ -198,25 +198,35 @@ async def id_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Chat ID: {update.effective_chat.id}")
 
 
+# ===== Debug helper for catch-up =====
+async def debug_catchup_message(ctx: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(SGT)
+    await ctx.bot.send_message(
+        DEFAULT_CHAT_ID,
+        f"⚙️ Catch-up active at {now:%a %d %b %Y %H:%M:%S} (SGT)"
+    )
+
+
 # ===== Scheduler =====
 def schedule_jobs(app: Application):
     jq = app.job_queue
 
     # Weekly polls (SGT)
-    # Tue 19:07 → CG poll
+
+    # Tue 19:20 → CG poll
     jq.run_daily(
         send_cell_group_poll,
-        time=time(19, 7, tzinfo=SGT),
+        time=time(19, 20, tzinfo=SGT),
         days=(1,),  # Tuesday
-        name="CG_TUE_1907",
+        name="CG_TUE_1920",
     )
 
-    # Tue 19:09 → Sunday Service poll
+    # Tue 19:22 → Sunday Service poll
     jq.run_daily(
         send_sunday_service_poll,
-        time=time(19, 9, tzinfo=SGT),
+        time=time(19, 22, tzinfo=SGT),
         days=(1,),  # Tuesday
-        name="SVC_TUE_1909",
+        name="SVC_TUE_1922",
     )
 
     # Fri 23:00 → Sunday Service poll
@@ -239,21 +249,24 @@ def schedule_jobs(app: Application):
 def catchup_on_start(app: Application):
     """
     Strong catch-up:
-    If it's Tuesday and we start AFTER 19:07 / 19:09 SGT,
-    still fire today's polls once.
+    If it's Tuesday and we start AFTER 19:20 / 19:22 SGT,
+    still fire today's polls once and send a debug message.
     """
     _load_state()
     now = datetime.now(SGT)
     jq = app.job_queue
 
     if now.weekday() == 1:  # Tuesday
-        # If current time is after or equal to 19:07 → catch up CG poll
-        if now.time() >= time(19, 7):
-            jq.run_once(send_cell_group_poll, when=5, name="CATCHUP_CG_TUE_1907")
+        # Always send a debug catch-up message when starting on Tuesday
+        jq.run_once(debug_catchup_message, when=3, name="DEBUG_CATCHUP_MSG")
 
-        # If current time is after or equal to 19:09 → catch up SVC poll
-        if now.time() >= time(19, 9):
-            jq.run_once(send_sunday_service_poll, when=10, name="CATCHUP_SVC_TUE_1909")
+        # If current time is after or equal to 19:20 → catch up CG poll
+        if now.time() >= time(19, 20):
+            jq.run_once(send_cell_group_poll, when=5, name="CATCHUP_CG_TUE_1920")
+
+        # If current time is after or equal to 19:22 → catch up SVC poll
+        if now.time() >= time(19, 22):
+            jq.run_once(send_sunday_service_poll, when=10, name="CATCHUP_SVC_TUE_1922")
 
 
 # ===== Init =====
