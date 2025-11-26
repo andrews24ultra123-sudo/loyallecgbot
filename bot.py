@@ -69,22 +69,18 @@ async def send_poll(question: str, options: list[str], allows_multiple: bool) ->
 async def send_cg_poll():
     now = datetime.now(TZ)
     d = now
-    # Next Friday (for the CG title)
+    # Compute next Friday for the CG poll title
     days_ahead = (4 - d.weekday()) % 7  # 4 = Friday
     target = d + timedelta(days=days_ahead)
     question = f"Cell Group – {_format_date_long(target)}"
-    options = [
-        "🍽️ Dinner 7.15pm",
-        "⛪ CG 8.15pm",
-        "❌ Cannot make it",
-    ]
+    options = ["🍽️ Dinner 7.15pm", "⛪ CG 8.15pm", "❌ Cannot make it"]
     await send_poll(question, options, allows_multiple=False)
 
 
 async def send_service_poll():
     now = datetime.now(TZ)
     d = now
-    # Next Sunday (for the Service title)
+    # Compute next Sunday for the Service poll title
     days_ahead = (6 - d.weekday()) % 7  # 6 = Sunday
     target = d + timedelta(days=days_ahead)
     question = f"Sunday Service – {_format_date_long(target)}"
@@ -122,40 +118,25 @@ async def one_off_debug_poll():
 
 async def scheduler_loop():
     """
-    Simple loop that checks SGT time every 15 seconds and fires events once per day.
+    Simple loop that checks SGT time every 15 seconds 
+    and fires events once per day.
     """
-    fired_today = set()  # track event names
+    fired_today = set()
     last_date = datetime.now(TZ).date()
 
     while True:
         now = datetime.now(TZ)
         today = now.date()
-        wd = now.weekday()  # 0=Mon ... 2=Wed ... 4=Fri ... 6=Sun
+        wd = now.weekday()  # 0=Mon ... 4=Fri ... 6=Sun
         h = now.hour
         m = now.minute
 
-        # Reset daily triggers at midnight
+        # Reset day-state at midnight
         if today != last_date:
             fired_today.clear()
             last_date = today
 
-        # === WEEKLY SCHEDULE ===
-
-        # Wednesday 17:12 → CG poll
-        if wd == 2 and h == 17 and m == 12:
-            event = "CG_WED_1712"
-            if event not in fired_today:
-                print(f"[scheduler_loop] Triggering {event} at {now}")
-                await send_cg_poll()
-                fired_today.add(event)
-
-        # Wednesday 17:14 → Service poll
-        if wd == 2 and h == 17 and m == 14:
-            event = "SVC_WED_1714"
-            if event not in fired_today:
-                print(f"[scheduler_loop] Triggering {event} at {now}")
-                await send_service_poll()
-                fired_today.add(event)
+        # === FINAL SCHEDULE ===
 
         # Friday 23:00 → Service poll
         if wd == 4 and h == 23 and m == 0:
@@ -180,13 +161,13 @@ async def main():
     print("=== Simple Scheduler START ===")
     print("DEBUG SGT now:", datetime.now(TZ))
 
-    # Send online message once
+    # Online message
     await send_online_message()
 
-    # One-off debug CG poll after 60s
+    # Debug CG poll 60s after startup
     asyncio.create_task(one_off_debug_poll())
 
-    # Start scheduler loop
+    # Start schedule loop
     await scheduler_loop()
 
 
