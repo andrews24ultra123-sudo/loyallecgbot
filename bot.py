@@ -116,6 +116,25 @@ async def one_off_debug_poll():
     await send_cg_poll()
 
 
+async def send_cg_reminder():
+    """
+    Weekly text reminder for CG poll.
+    """
+    now = datetime.now(TZ)
+    text = "📝 Remember to vote for the CG Poll if you have not done so yet!"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+    }
+    async with httpx.AsyncClient() as client:
+        try:
+            print(f"[send_cg_reminder] Sending reminder at {now}")
+            resp = await client.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10)
+            print("DEBUG reminder sendMessage:", resp.status_code, resp.text)
+        except Exception as e:
+            print("Error in send_cg_reminder:", e)
+
+
 async def scheduler_loop():
     """
     Simple loop that checks SGT time every 15 seconds 
@@ -127,7 +146,7 @@ async def scheduler_loop():
     while True:
         now = datetime.now(TZ)
         today = now.date()
-        wd = now.weekday()  # 0=Mon ... 4=Fri ... 6=Sun
+        wd = now.weekday()  # 0=Mon ... 2=Wed ... 4=Fri ... 6=Sun
         h = now.hour
         m = now.minute
 
@@ -137,6 +156,14 @@ async def scheduler_loop():
             last_date = today
 
         # === FINAL SCHEDULE ===
+
+        # Wednesday 17:30 → CG reminder text
+        if wd == 2 and h == 17 and m == 30:
+            event = "REM_WED_1730"
+            if event not in fired_today:
+                print(f"[scheduler_loop] Triggering {event} at {now}")
+                await send_cg_reminder()
+                fired_today.add(event)
 
         # Friday 23:00 → Service poll
         if wd == 4 and h == 23 and m == 0:
