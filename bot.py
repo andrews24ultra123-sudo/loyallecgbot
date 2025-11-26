@@ -1,11 +1,8 @@
 import asyncio
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.date import DateTrigger
 
 # === CONFIG ===
 
@@ -60,19 +57,20 @@ async def send_poll(question: str, options: list[str], allows_multiple: bool) ->
                     "message_id": message_id,
                     "disable_notification": True,
                 }
-                pin_resp = await client.post(f"{BASE_URL}/pinChatMessage", json=pin_payload, timeout=20)
+                pin_resp = await client.post(
+                    f"{BASE_URL}/pinChatMessage", json=pin_payload, timeout=20
+                )
                 print("DEBUG pinChatMessage:", pin_resp.status_code, pin_resp.text)
 
         except Exception as e:
             print("Error in send_poll:", e)
 
 
-async def job_cg_poll():
+async def send_cg_poll():
     now = datetime.now(TZ)
-    print(f"[job_cg_poll] Fired at {now}")
     d = now
-    # Next Friday
-    days_ahead = (4 - d.weekday()) % 7
+    # Next Friday (for the CG title)
+    days_ahead = (4 - d.weekday()) % 7  # 4 = Friday
     target = d + timedelta(days=days_ahead)
     question = f"Cell Group – {_format_date_long(target)}"
     options = [
@@ -83,12 +81,11 @@ async def job_cg_poll():
     await send_poll(question, options, allows_multiple=False)
 
 
-async def job_service_poll():
+async def send_service_poll():
     now = datetime.now(TZ)
-    print(f"[job_service_poll] Fired at {now}")
     d = now
-    # Next Sunday
-    days_ahead = (6 - d.weekday()) % 7
+    # Next Sunday (for the Service title)
+    days_ahead = (6 - d.weekday()) % 7  # 6 = Sunday
     target = d + timedelta(days=days_ahead)
     question = f"Sunday Service – {_format_date_long(target)}"
     options = [
@@ -101,7 +98,7 @@ async def job_service_poll():
     await send_poll(question, options, allows_multiple=True)
 
 
-async def debug_message():
+async def send_online_message():
     now = datetime.now(TZ)
     payload = {
         "chat_id": CHAT_ID,
@@ -109,86 +106,86 @@ async def debug_message():
     }
     async with httpx.AsyncClient() as client:
         try:
-            print("[debug_message] Sending scheduler online message")
             resp = await client.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10)
             print("DEBUG sendMessage:", resp.status_code, resp.text)
         except Exception as e:
-            print("Error in debug_message:", e)
+            print("Error in send_online_message:", e)
 
 
-async def debug_one_off_poll():
+async def one_off_debug_poll():
+    # One-time CG poll 60s after startup, just to prove it's alive
+    await asyncio.sleep(60)
     now = datetime.now(TZ)
-    print(f"[debug_one_off_poll] Fired at {now}")
-    await job_cg_poll()
+    print(f"[one_off_debug_poll] Firing debug CG poll at {now}")
+    await send_cg_poll()
+
+
+async def scheduler_loop():
+    """
+    Simple loop that checks SGT time every 15 seconds and fires events once per day.
+    """
+    fired_today = set()  # set of event_name strings
+    last_date = datetime.now(TZ).date()
+
+    while True:
+        now = datetime.now(TZ)
+        today = now.date()
+        wd = now.weekday()  # 0=Mon,1=Tue,2=Wed,3=Thu,4=Fri,5=Sat,6=Sun
+        h = now.hour
+        m = now.minute
+
+        # Reset per-day markers at midnight
+        if today != last_date:
+            fired_today.clear()
+            last_date = today
+
+        # Wednesday 16:52 → CG poll
+        if wd == 2 and h == 16 and m == 52:
+            event = "CG_WED_1652"
+            if event not in fired_today:
+                print(f"[scheduler_loop] Triggering {event} at {now}")
+                await send_cg_poll()
+                fired_today.add(event)
+
+        # Wednesday 16:54 → Service poll
+        if wd == 2 and h == 16 and m == 54:
+            event = "SVC_WED_1654"
+            if event not in fired_today:
+                print(f"[scheduler_loop] Triggering {event} at {now}")
+                await send_service_poll()
+                fired_today.add(event)
+
+        # Friday 23:00 → Service poll
+        if wd == 4 and h == 23 and m == 0:
+            event = "SVC_FRI_2300"
+            if event not in fired_today:
+                print(f"[scheduler_loop] Triggering {event} at {now}")
+                await send_service_poll()
+                fired_today.add(event)
+
+        # Sunday 14:00 → CG poll
+        if wd == 6 and h == 14 and m == 0:
+            event = "CG_SUN_1400"
+            if event not in fired_today:
+                print(f"[scheduler_loop] Triggering {event} at {now}")
+                await send_cg_poll()
+                fired_today.add(event)
+
+        await asyncio.sleep(15)
 
 
 async def main():
-    print("=== Scheduler START ===")
-    print("DEBUG UTC now:", datetime.now(dt_timezone.utc))
+    print("=== Simple Scheduler START ===")
     print("DEBUG SGT now:", datetime.now(TZ))
 
-    scheduler = AsyncIOScheduler(timezone=TZ)
+    # Send online message once
+    await send_online_message()
 
-    # One-time debug "online" message (30s after startup)
-    scheduler.add_job(
-        debug_message,
-        DateTrigger(run_date=datetime.now(TZ) + timedelta(seconds=30)),
-        name="DEBUG_STARTUP_MESSAGE",
-    )
+    # Fire one debug CG poll after 60s (optional but helpful)
+    asyncio.create_task(one_off_debug_poll())
 
-    # === Weekly schedule (all in SGT) ===
-
-    # Wednesday 16:24 → CG poll
-    scheduler.add_job(
-        job_cg_poll,
-        CronTrigger(day_of_week="wed", hour=16, minute=24),
-        name="CG_WED_1624",
-    )
-
-    # Wednesday 16:26 → Service poll
-    scheduler.add_job(
-        job_service_poll,
-        CronTrigger(day_of_week="wed", hour=16, minute=26),
-        name="SVC_WED_1626",
-    )
-
-    # Friday 23:00 → Service poll
-    scheduler.add_job(
-        job_service_poll,
-        CronTrigger(day_of_week="fri", hour=23, minute=0),
-        name="SVC_FRI_2300",
-    )
-
-    # Sunday 14:00 → CG poll
-    scheduler.add_job(
-        job_cg_poll,
-        CronTrigger(day_of_week="sun", hour=14, minute=0),
-        name="CG_SUN_1400",
-    )
-
-    # One-off CG poll 60s after startup (diagnostic)
-    scheduler.add_job(
-        debug_one_off_poll,
-        DateTrigger(run_date=datetime.now(TZ) + timedelta(seconds=60)),
-        name="DEBUG_CG_ONCE_60S",
-    )
-
-    print("=== Jobs before start() ===")
-    for job in scheduler.get_jobs():
-        print("JOB:", job)
-
-    scheduler.start()
-
-    print("=== Jobs after start() ===")
-    for job in scheduler.get_jobs():
-        print("JOB:", job)
-
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except (KeyboardInterrupt, SystemExit):
-        print("Shutting down scheduler...")
-        scheduler.shutdown()
+    # Start the main scheduler loop
+    await scheduler_loop()
 
 
 if __name__ == "__main__":
