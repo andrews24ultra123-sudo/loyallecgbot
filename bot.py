@@ -69,7 +69,7 @@ async def send_poll(question: str, options: list[str], allows_multiple: bool) ->
 async def send_cg_poll():
     now = datetime.now(TZ)
     d = now
-    # Compute next Friday for the CG poll title
+    # Next Friday for CG poll title
     days_ahead = (4 - d.weekday()) % 7  # 4 = Friday
     target = d + timedelta(days=days_ahead)
     question = f"Cell Group – {_format_date_long(target)}"
@@ -80,7 +80,7 @@ async def send_cg_poll():
 async def send_service_poll():
     now = datetime.now(TZ)
     d = now
-    # Compute next Sunday for the Service poll title
+    # Next Sunday for Service poll title
     days_ahead = (6 - d.weekday()) % 7  # 6 = Sunday
     target = d + timedelta(days=days_ahead)
     question = f"Sunday Service – {_format_date_long(target)}"
@@ -109,7 +109,7 @@ async def send_online_message():
 
 
 async def one_off_debug_poll():
-    # Fires once 60 seconds after startup
+    # Fires once 60 seconds after startup (sanity check)
     await asyncio.sleep(60)
     now = datetime.now(TZ)
     print(f"[one_off_debug_poll] Firing debug CG poll at {now}")
@@ -117,22 +117,29 @@ async def one_off_debug_poll():
 
 
 async def send_cg_reminder():
-    """
-    Weekly text reminder for CG poll.
-    """
     now = datetime.now(TZ)
     text = "📝 Remember to vote for the CG Poll if you have not done so yet!"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-    }
+    payload = {"chat_id": CHAT_ID, "text": text}
     async with httpx.AsyncClient() as client:
         try:
-            print(f"[send_cg_reminder] Sending reminder at {now}")
+            print(f"[send_cg_reminder] Sending CG reminder at {now}")
             resp = await client.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10)
             print("DEBUG reminder sendMessage:", resp.status_code, resp.text)
         except Exception as e:
             print("Error in send_cg_reminder:", e)
+
+
+async def send_service_reminder():
+    now = datetime.now(TZ)
+    text = "📝 Remember to vote for the Sunday Service Poll if you have not done so yet!"
+    payload = {"chat_id": CHAT_ID, "text": text}
+    async with httpx.AsyncClient() as client:
+        try:
+            print(f"[send_service_reminder] Sending Service reminder at {now}")
+            resp = await client.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10)
+            print("DEBUG reminder sendMessage:", resp.status_code, resp.text)
+        except Exception as e:
+            print("Error in send_service_reminder:", e)
 
 
 async def scheduler_loop():
@@ -146,26 +153,34 @@ async def scheduler_loop():
     while True:
         now = datetime.now(TZ)
         today = now.date()
-        wd = now.weekday()  # 0=Mon ... 2=Wed ... 4=Fri ... 6=Sun
+        wd = now.weekday()  # 0=Mon,1=Tue,2=Wed,3=Thu,4=Fri,5=Sat,6=Sun
         h = now.hour
         m = now.minute
 
-        # Reset day-state at midnight
+        # Reset per-day markers at midnight
         if today != last_date:
             fired_today.clear()
             last_date = today
 
-        # === FINAL SCHEDULE ===
+        # === YOUR SCHEDULE (SGT) ===
 
-        # Wednesday 17:30 → CG reminder text
+        # Every Wednesday 17:30 → CG reminder
         if wd == 2 and h == 17 and m == 30:
-            event = "REM_WED_1730"
+            event = "REM_CG_WED_1730"
             if event not in fired_today:
                 print(f"[scheduler_loop] Triggering {event} at {now}")
                 await send_cg_reminder()
                 fired_today.add(event)
 
-        # Friday 23:00 → Service poll
+        # Every Friday 15:00 → CG reminder
+        if wd == 4 and h == 15 and m == 0:
+            event = "REM_CG_FRI_1500"
+            if event not in fired_today:
+                print(f"[scheduler_loop] Triggering {event} at {now}")
+                await send_cg_reminder()
+                fired_today.add(event)
+
+        # Every Friday 23:00 → Sunday Service poll
         if wd == 4 and h == 23 and m == 0:
             event = "SVC_FRI_2300"
             if event not in fired_today:
@@ -173,7 +188,15 @@ async def scheduler_loop():
                 await send_service_poll()
                 fired_today.add(event)
 
-        # Sunday 14:00 → CG poll
+        # Every Saturday 17:30 → Sunday Service reminder
+        if wd == 5 and h == 17 and m == 30:
+            event = "REM_SVC_SAT_1730"
+            if event not in fired_today:
+                print(f"[scheduler_loop] Triggering {event} at {now}")
+                await send_service_reminder()
+                fired_today.add(event)
+
+        # Every Sunday 14:00 → CG poll
         if wd == 6 and h == 14 and m == 0:
             event = "CG_SUN_1400"
             if event not in fired_today:
@@ -194,7 +217,7 @@ async def main():
     # Debug CG poll 60s after startup
     asyncio.create_task(one_off_debug_poll())
 
-    # Start schedule loop
+    # Start main schedule loop
     await scheduler_loop()
 
 
