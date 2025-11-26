@@ -113,7 +113,7 @@ async def send_online_message():
 
 
 async def one_off_debug_poll():
-    # One-time CG poll 60s after startup, just to prove it's alive
+    # Fires once 60 seconds after startup
     await asyncio.sleep(60)
     now = datetime.now(TZ)
     print(f"[one_off_debug_poll] Firing debug CG poll at {now}")
@@ -124,32 +124,34 @@ async def scheduler_loop():
     """
     Simple loop that checks SGT time every 15 seconds and fires events once per day.
     """
-    fired_today = set()  # set of event_name strings
+    fired_today = set()  # track event names
     last_date = datetime.now(TZ).date()
 
     while True:
         now = datetime.now(TZ)
         today = now.date()
-        wd = now.weekday()  # 0=Mon,1=Tue,2=Wed,3=Thu,4=Fri,5=Sat,6=Sun
+        wd = now.weekday()  # 0=Mon ... 2=Wed ... 4=Fri ... 6=Sun
         h = now.hour
         m = now.minute
 
-        # Reset per-day markers at midnight
+        # Reset daily triggers at midnight
         if today != last_date:
             fired_today.clear()
             last_date = today
 
-        # Wednesday 16:52 → CG poll
-        if wd == 2 and h == 16 and m == 52:
-            event = "CG_WED_1652"
+        # === WEEKLY SCHEDULE ===
+
+        # Wednesday 17:12 → CG poll
+        if wd == 2 and h == 17 and m == 12:
+            event = "CG_WED_1712"
             if event not in fired_today:
                 print(f"[scheduler_loop] Triggering {event} at {now}")
                 await send_cg_poll()
                 fired_today.add(event)
 
-        # Wednesday 16:54 → Service poll
-        if wd == 2 and h == 16 and m == 54:
-            event = "SVC_WED_1654"
+        # Wednesday 17:14 → Service poll
+        if wd == 2 and h == 17 and m == 14:
+            event = "SVC_WED_1714"
             if event not in fired_today:
                 print(f"[scheduler_loop] Triggering {event} at {now}")
                 await send_service_poll()
@@ -181,10 +183,10 @@ async def main():
     # Send online message once
     await send_online_message()
 
-    # Fire one debug CG poll after 60s (optional but helpful)
+    # One-off debug CG poll after 60s
     asyncio.create_task(one_off_debug_poll())
 
-    # Start the main scheduler loop
+    # Start scheduler loop
     await scheduler_loop()
 
 
