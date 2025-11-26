@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -26,7 +26,7 @@ def _format_date_long(d: datetime) -> str:
 
 async def send_poll(question: str, options: list[str], allows_multiple: bool) -> None:
     """
-    Send a poll directly via Telegram Bot API and pin it.
+    Send a poll directly via Telegram Bot API and pin it (best-effort).
     """
     payload = {
         "chat_id": CHAT_ID,
@@ -38,7 +38,8 @@ async def send_poll(question: str, options: list[str], allows_multiple: bool) ->
 
     async with httpx.AsyncClient() as client:
         try:
-            print(f"[send_poll] Sending poll at {datetime.now(TZ)} → {question}")
+            now = datetime.now(TZ)
+            print(f"[send_poll] Sending poll at {now} → {question}")
             resp = await client.post(f"{BASE_URL}/sendPoll", json=payload, timeout=20)
             print("DEBUG sendPoll:", resp.status_code, resp.text)
 
@@ -53,7 +54,7 @@ async def send_poll(question: str, options: list[str], allows_multiple: bool) ->
             msg = data.get("result", {})
             message_id = msg.get("message_id")
             if message_id:
-                # Try to pin (best-effort)
+                # Try to pin
                 pin_payload = {
                     "chat_id": CHAT_ID,
                     "message_id": message_id,
@@ -74,7 +75,6 @@ async def job_cg_poll():
     days_ahead = (4 - d.weekday()) % 7
     target = d + timedelta(days=days_ahead)
     question = f"Cell Group – {_format_date_long(target)}"
-
     options = [
         "🍽️ Dinner 7.15pm",
         "⛪ CG 8.15pm",
@@ -91,7 +91,6 @@ async def job_service_poll():
     days_ahead = (6 - d.weekday()) % 7
     target = d + timedelta(days=days_ahead)
     question = f"Sunday Service – {_format_date_long(target)}"
-
     options = [
         "⏰ 9am",
         "🕚 11.15am",
@@ -110,6 +109,7 @@ async def debug_message():
     }
     async with httpx.AsyncClient() as client:
         try:
+            print("[debug_message] Sending scheduler online message")
             resp = await client.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10)
             print("DEBUG sendMessage:", resp.status_code, resp.text)
         except Exception as e:
@@ -124,32 +124,32 @@ async def debug_one_off_poll():
 
 async def main():
     print("=== Scheduler START ===")
-    print("DEBUG UTC now:", datetime.utcnow())
+    print("DEBUG UTC now:", datetime.now(dt_timezone.utc))
     print("DEBUG SGT now:", datetime.now(TZ))
 
     scheduler = AsyncIOScheduler(timezone=TZ)
 
-    # === One-time debug message 30s after startup ===
+    # One-time debug "online" message (30s after startup)
     scheduler.add_job(
         debug_message,
         DateTrigger(run_date=datetime.now(TZ) + timedelta(seconds=30)),
         name="DEBUG_STARTUP_MESSAGE",
     )
 
-    # === Weekly schedule (SGT) ===
+    # === Weekly schedule (all in SGT) ===
 
-    # Wednesday 16:07 → CG poll
+    # Wednesday 16:24 → CG poll
     scheduler.add_job(
         job_cg_poll,
-        CronTrigger(day_of_week="wed", hour=16, minute=7),
-        name="CG_WED_1607",
+        CronTrigger(day_of_week="wed", hour=16, minute=24),
+        name="CG_WED_1624",
     )
 
-    # Wednesday 16:09 → Service poll
+    # Wednesday 16:26 → Service poll
     scheduler.add_job(
         job_service_poll,
-        CronTrigger(day_of_week="wed", hour=16, minute=9),
-        name="SVC_WED_1609",
+        CronTrigger(day_of_week="wed", hour=16, minute=26),
+        name="SVC_WED_1626",
     )
 
     # Friday 23:00 → Service poll
@@ -173,22 +173,21 @@ async def main():
         name="DEBUG_CG_ONCE_60S",
     )
 
-    # Print jobs BEFORE start
     print("=== Jobs before start() ===")
     for job in scheduler.get_jobs():
-        print(f"JOB {job.name}: next_run_time={job.next_run_time}")
+        print("JOB:", job)
 
     scheduler.start()
 
-    # Print jobs AFTER start
     print("=== Jobs after start() ===")
     for job in scheduler.get_jobs():
-        print(f"JOB {job.name}: next_run_time={job.next_run_time}")
+        print("JOB:", job)
 
     try:
         while True:
             await asyncio.sleep(3600)
     except (KeyboardInterrupt, SystemExit):
+        print("Shutting down scheduler...")
         scheduler.shutdown()
 
 
