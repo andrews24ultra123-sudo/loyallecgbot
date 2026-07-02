@@ -4,10 +4,10 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-# === CONFIG ===
+import os
 
-TOKEN = "8448114982:AAFjVekkgALSK9M3CKc8K7KjrUSTcsvPvIc"
-CHAT_ID = -1001819726736
+TOKEN = os.environ["BOT_TOKEN"]
+CHAT_ID = int(os.environ["CHAT_ID"])
 
 BASE_URL = f"https://api.telegram.org/bot{TOKEN}"
 TZ = ZoneInfo("Asia/Singapore")
